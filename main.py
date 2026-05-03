@@ -25,7 +25,10 @@ def is_image_page(img):
     gray = img.convert('L')
     pixels = list(gray.getdata())
     avg = sum(pixels) / len(pixels)
-    return avg < 180
+    dark_pixels = sum(1 for p in pixels if p < 80)
+    dark_ratio = dark_pixels / len(pixels)
+    print(f"  avg={avg:.0f}, dark_ratio={dark_ratio:.2f}")
+    return avg < 120 and dark_ratio > 0.40
 
 def extract_images(pdf_bytes, max_pages=8):
     try:
@@ -35,9 +38,9 @@ def extract_images(pdf_bytes, max_pages=8):
         pages = convert_from_bytes(pdf_bytes, dpi=120, first_page=1, last_page=max_pages, fmt='jpeg')
         for i, img in enumerate(pages):
             if not is_image_page(img):
-                print(f"Page {i+1}: texte ignoree")
+                print(f"Page {i+1}: ignoree")
                 continue
-            print(f"Page {i+1}: image conservee")
+            print(f"Page {i+1}: conservee")
             if img.width > 1200:
                 r = 1200 / img.width
                 img = img.resize((1200, int(img.height * r)), Image.LANCZOS)
