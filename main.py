@@ -9,121 +9,59 @@ CLAUDE_KEY = os.environ.get('CLAUDE_API_KEY', '')
 
 @app.route('/health', methods=['GET'])
 def health():
-    return jsonify({'status': 'ok', 'service': 'CardioVet CR Generator v5', 'key_set': bool(CLAUDE_KEY)})
+    return jsonify({'status': 'ok', 'service': 'CardioVet CR Generator v7 BMP', 'key_set': bool(CLAUDE_KEY)})
 
-def download_pdf(sb_url, sb_key, file_path):
+def download_image(sb_url, sb_key, file_path):
     try:
         import requests
         url = f"{sb_url}/storage/v1/object/cardiovet-files/{file_path}"
         r = requests.get(url, headers={'apikey': sb_key, 'Authorization': f'Bearer {sb_key}'}, timeout=30)
         return r.content if r.status_code == 200 else None
     except Exception as e:
-        print(f"Download error: {e}")
+        print(f"Download error {file_path}: {e}")
         return None
 
-def is_echo_image(img):
-    gray = img.convert('L')
-    pixels = list(gray.getdata())
-    avg = sum(pixels) / len(pixels)
-    light_pixels = sum(1 for p in pixels if p > 50)
-    light_ratio = light_pixels / len(pixels)
-    return light_ratio > 0.05 and avg > 5
-
-def is_dark_page(img):
-    gray = img.convert('L')
-    pixels = list(gray.getdata())
-    avg = sum(pixels) / len(pixels)
-    dark_pixels = sum(1 for p in pixels if p < 80)
-    dark_ratio = dark_pixels / len(pixels)
-    print(f"  avg={avg:.0f}, dark_ratio={dark_ratio:.2f}")
-    return avg < 130 and dark_ratio > 0.35
-
-def split_page_into_quadrants(img):
-    """Decoupe une page Esaote en 6 vues individuelles (grille 2x3)"""
-    from PIL import Image
-    w, h = img.size
-    # Header Esaote (patient info) = ~12% du haut, footer = ~4% du bas
-    top_offset = int(h * 0.12)
-    bottom_offset = int(h * 0.04)
-    usable_h = h - top_offset - bottom_offset
-    half_w = w // 2
-    third_h = usable_h // 3
-
-    # Marge interne pour eviter de couper sur les bordures entre images
-    margin_x = int(w * 0.005)
-    margin_y = int(h * 0.005)
-
-    views = []
-    for row in range(3):
-        for col in range(2):
-            x1 = col * half_w + margin_x
-            y1 = top_offset + row * third_h + margin_y
-            x2 = x1 + half_w - margin_x * 2
-            y2 = y1 + third_h - margin_y * 2
-            views.append(img.crop((x1, y1, x2, y2)))
-    return views
-
-def extract_individual_views(pdf_bytes, max_pages=8):
+def image_to_jpeg_b64(img_bytes, filename=''):
+    """Convertit n'importe quel format image en JPEG base64"""
     try:
-        from pdf2image import convert_from_bytes
         from PIL import Image
-        views_b64 = []
-        pages = convert_from_bytes(pdf_bytes, dpi=150, first_page=1, last_page=max_pages, fmt='jpeg')
-
-        for i, page in enumerate(pages):
-            if not is_dark_page(page):
-                print(f"Page {i+1}: texte ignoree")
-                continue
-            print(f"Page {i+1}: decoupage en vues individuelles")
-
-            views = split_page_into_quadrants(page)
-            for q_idx, view in enumerate(views):
-                if not is_echo_image(view):
-                    print(f"  Vue {q_idx+1}: vide, ignoree")
-                    continue
-                target_w = 800
-                if view.width > target_w:
-                    ratio = target_w / view.width
-                    view = view.resize((target_w, int(view.height * ratio)), Image.LANCZOS)
-                buf = io.BytesIO()
-                view.save(buf, format='JPEG', quality=85)
-                views_b64.append(base64.b64encode(buf.getvalue()).decode())
-                print(f"  Vue {q_idx+1}: conservee ({view.width}x{view.height})")
-
-        print(f"Total vues extraites: {len(views_b64)}")
-        return views_b64
+        img = Image.open(io.BytesIO(img_bytes))
+        # Convertir en RGB si nécessaire (BMP peut être en modes divers)
+        if img.mode not in ('RGB', 'L'):
+            img = img.convert('RGB')
+        # Redimensionner si trop grand
+        max_w = 1024
+        if img.width > max_w:
+            ratio = max_w / img.width
+            img = img.resize((max_w, int(img.height * ratio)), Image.LANCZOS)
+        buf = io.BytesIO()
+        img.save(buf, format='JPEG', quality=85)
+        return base64.b64encode(buf.getvalue()).decode()
     except Exception as e:
-        print(f"Extraction error: {e}")
-        import traceback
-        traceback.print_exc()
-        return []
+        print(f"Image conversion error {filename}: {e}")
+        return None
 
-def comment_single_view(img_b64, view_num, patient_info, key):
+def comment_single_image(img_b64, image_num, patient_info, key):
+    """Claude Vision analyse une image échographique individuelle"""
     try:
         import anthropic as ac
         client_ai = ac.Anthropic(api_key=key)
-
         msg = client_ai.messages.create(
             model='claude-sonnet-4-6',
             max_tokens=250,
             messages=[{
                 'role': 'user',
                 'content': [
-                    {
-                        "type": "image",
-                        "source": {"type": "base64", "media_type": "image/jpeg", "data": img_b64}
-                    },
-                    {
-                        "type": "text",
-                        "text": (
-                            f"Patient: {patient_info.get('animalName','?')}, "
-                            f"{patient_info.get('species','Chien')}, {patient_info.get('weight','?')}kg.\n\n"
-                            "Tu es cardiologue veterinaire expert en echocardiographie canine et feline.\n"
-                            "Identifie le type de coupe/mode echographique et fais une observation diagnostique courte.\n"
-                            "Reponds UNIQUEMENT en JSON (pas de markdown):\n"
-                            '{"caption":"type de vue court ex: Parasternale droite grand axe Mode B","comment":"observation diagnostique 1 phrase max 120 car"}'
-                        )
-                    }
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": img_b64}},
+                    {"type": "text", "text": (
+                        f"Patient: {patient_info.get('animalName','?')}, "
+                        f"{patient_info.get('species','Chien')}, {patient_info.get('weight','?')}kg.\n\n"
+                        "Tu es cardiologue veterinaire expert en echocardiographie canine et feline.\n"
+                        "Identifie precisement le type de coupe et le mode echographique visible sur cette image, "
+                        "puis fais une observation diagnostique clinique courte et precise.\n"
+                        "Reponds UNIQUEMENT en JSON (pas de markdown):\n"
+                        '{"caption":"type de vue ex: Parasternale droite grand axe Mode B","comment":"observation clinique precise max 130 car"}'
+                    )}
                 ]
             }]
         )
@@ -133,45 +71,43 @@ def comment_single_view(img_b64, view_num, patient_info, key):
         if match:
             result = json.loads(match.group(0))
             return {
-                'caption': result.get('caption', f'Vue {view_num+1}'),
+                'caption': result.get('caption', f'Vue {image_num+1}'),
                 'comment': result.get('comment', '')
             }
-        return {'caption': f'Vue echographique {view_num+1}', 'comment': ''}
+        return {'caption': f'Vue echographique {image_num+1}', 'comment': ''}
     except Exception as e:
-        print(f"Vision error vue {view_num+1}: {e}")
-        return {'caption': f'Vue echographique {view_num+1}', 'comment': ''}
+        print(f"Vision error {image_num+1}: {e}")
+        return {'caption': f'Vue echographique {image_num+1}', 'comment': ''}
 
-def build_images_html(views_b64, comments):
-    if not views_b64:
+def build_images_html(images_b64, comments):
+    if not images_b64:
         return ''
     html = (
         '<div style="background:#1a3a5c;color:white;padding:6px 12px;font-weight:bold;'
         'font-size:11px;margin:14px 0 6px">IMAGES ECHOGRAPHIQUES</div>'
         '<p style="font-size:9px;color:#6b7280;margin-bottom:10px">'
-        'Vues echographiques individuelles (Esaote MyLab) — interpretation automatique par IA.</p>'
+        'Vues echographiques (Esaote MyLab) — interpretation automatique par IA.</p>'
         '<table style="width:100%;border-collapse:collapse;margin-bottom:12px">'
     )
-    for i in range(0, len(views_b64), 2):
+    for i in range(0, len(images_b64), 2):
         html += '<tr>'
         for j in range(2):
             idx = i + j
-            if idx < len(views_b64):
+            if idx < len(images_b64):
                 com = comments[idx] if idx < len(comments) else {}
                 caption = com.get('caption', f'Vue {idx+1}')
                 comment = com.get('comment', '')
-                img_data = f'data:image/jpeg;base64,{views_b64[idx]}'
+                img_data = f'data:image/jpeg;base64,{images_b64[idx]}'
                 html += (
                     f'<td style="width:50%;padding:6px;vertical-align:top;'
                     f'border:1px solid #e5e7eb;background:#f9fafb">'
-                    f'<img src="{img_data}" style="width:100%;border-radius:3px;display:block;'
-                    f'border:1px solid #1a3a5c"/>'
+                    f'<img src="{img_data}" style="width:100%;border-radius:3px 3px 0 0;display:block;'
+                    f'border:1px solid #1a3a5c;border-bottom:none"/>'
                     f'<div style="background:#1a3a5c;color:white;font-size:9px;font-weight:bold;'
-                    f'padding:3px 6px;margin-top:0;border-radius:0 0 3px 3px">{caption}</div>'
-                    + (
-                        f'<div style="font-size:8px;color:#1e3a5f;margin-top:4px;'
-                        f'font-style:italic;line-height:1.5;padding:0 2px">'
-                        f'&#x1F50D; {comment}</div>' if comment else ''
-                    )
+                    f'padding:4px 6px">{caption}</div>'
+                    + (f'<div style="font-size:8px;color:#1e3a5f;padding:4px 6px;'
+                       f'font-style:italic;line-height:1.5;background:white;border:1px solid #e5e7eb;border-top:none">'
+                       f'&#x1F50D; {comment}</div>' if comment else '')
                     + '</td>'
                 )
             else:
@@ -191,14 +127,15 @@ def generate_cr():
     if not data:
         return jsonify({'error': 'No data'}), 400
 
-    xml_data   = data.get('xmlData', '')
-    patient    = data.get('patient', {})
-    file_path  = data.get('filePath', '')
-    consult_id = data.get('consultId', '')
-    sb_url     = data.get('supabaseUrl', 'https://ddphqsmihbasndmautyu.supabase.co')
-    sb_key     = data.get('supabaseKey', '')
-    weight     = float(patient.get('weight', 0) or 0)
-    bw_exp     = round(weight ** 0.294, 3) if weight > 0 else None
+    xml_data    = data.get('xmlData', '')
+    patient     = data.get('patient', {})
+    image_paths = data.get('imagePaths', [])
+    file_path   = data.get('filePath', '')
+    consult_id  = data.get('consultId', '')
+    sb_url      = data.get('supabaseUrl', 'https://ddphqsmihbasndmautyu.supabase.co')
+    sb_key      = data.get('supabaseKey', '')
+    weight      = float(patient.get('weight', 0) or 0)
+    bw_exp      = round(weight ** 0.294, 3) if weight > 0 else None
 
     def xm(key):
         r = re.search(r'Description="' + re.escape(key) + r'"[\s\S]*?<MeanValue[^>]*Value="([^"]+)"', xml_data)
@@ -230,24 +167,40 @@ def generate_cr():
     cornell = {k: round(c * bw_exp * 10, 1) if bw_exp else None
                for k, c in [('LVIDd', 1.53), ('LVIDs', 0.97), ('IVSd', 0.48), ('PPd', 0.48)]}
 
-    views_b64 = []
-    if file_path and sb_key:
-        pdf_bytes = download_pdf(sb_url, sb_key, file_path)
-        if pdf_bytes:
-            print(f"PDF: {len(pdf_bytes)} bytes")
-            views_b64 = extract_individual_views(pdf_bytes, max_pages=10)
+    # Télécharger et convertir les images BMP
+    images_b64 = []
+    paths_to_use = image_paths if image_paths else ([file_path] if file_path else [])
+    print(f"Images to process: {len(paths_to_use)}")
+
+    for path in paths_to_use[:12]:  # max 12 images
+        if not path:
+            continue
+        img_bytes = download_image(sb_url, sb_key, path)
+        if img_bytes:
+            b64 = image_to_jpeg_b64(img_bytes, path)
+            if b64:
+                images_b64.append(b64)
+                print(f"  OK: {path.split('/')[-1]}")
+            else:
+                print(f"  FAIL convert: {path}")
+        else:
+            print(f"  FAIL download: {path}")
+
+    print(f"Images ready: {len(images_b64)}")
 
     key = CLAUDE_KEY
     if not key:
         return jsonify({'error': 'CLAUDE_API_KEY not set'}), 500
 
+    # Analyser chaque image avec Claude Vision (max 8)
     comments = []
-    for i, v_b64 in enumerate(views_b64[:8]):
-        print(f"Vision image {i+1}/{min(len(views_b64),8)}...")
-        com = comment_single_view(v_b64, i, patient, key)
+    for i, b64 in enumerate(images_b64[:8]):
+        print(f"Vision {i+1}/{min(len(images_b64),8)}...")
+        com = comment_single_image(b64, i, patient, key)
         comments.append(com)
-        print(f"  {com.get('caption','?')[:50]}")
+        print(f"  -> {com.get('caption','?')[:60]}")
 
+    # Générer le CR textuel
     prompt = (
         f"Tu es Dr Vet. Sebastien ROUL, cardiologue veterinaire (N 6603 OMV / MRCVS).\n"
         f"Patient: {patient.get('animalName','?')} {patient.get('species','Chien')}"
@@ -320,13 +273,13 @@ def generate_cr():
         if v is not None and k in report.get('mesures', {}):
             report['mesures'][k]['val'] = v
 
-    images_html = build_images_html(views_b64[:8], comments)
+    images_html = build_images_html(images_b64[:8], comments)
 
     return jsonify({
         'success': True,
         'report': report,
         'images_html': images_html,
-        'images_count': len(views_b64),
+        'images_count': len(images_b64),
         'weight': weight,
         'bw_exp': bw_exp
     })
