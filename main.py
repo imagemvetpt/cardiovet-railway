@@ -76,28 +76,28 @@ def generate_cr():
         f"Génère un compte rendu échocardiographique professionnel complet.\n"
         f"Statuts: N=normal, L=limite (10-20% hors norme), A=anormal (>20%).\n"
         f"Réponds UNIQUEMENT en JSON valide sans markdown:\n"
-        f'{{"mesures":{{"LVIDd":{{"val":null,"statut":"N","signification":"..."}},'
-        f'"LVIDs":{{"val":null,"statut":"N","signification":"..."}},'
-        f'"IVSd":{{"val":null,"statut":"N","signification":"..."}},'
-        f'"PPd":{{"val":null,"statut":"N","signification":"..."}},'
-        f'"LVIDdN":{{"val":null,"statut":"N","signification":"..."}},'
-        f'"EPR":{{"val":null,"statut":"N","signification":"..."}},'
-        f'"FE":{{"val":null,"statut":"N","signification":"..."}},'
-        f'"FR":{{"val":null,"statut":"N","signification":"..."}},'
-        f'"FC":{{"val":null,"statut":"N","signification":"..."}},'
-        f'"DC":{{"val":null,"statut":"N","signification":"..."}},'
-        f'"VmaxAo":{{"val":null,"statut":"N","signification":"..."}},'
-        f'"GmaxAo":{{"val":null,"statut":"N","signification":"..."}},'
-        f'"VmaxAP":{{"val":null,"statut":"N","signification":"..."}},'
-        f'"VmaxIM":{{"val":null,"statut":"N","signification":"..."}},'
-        f'"OGAo":{{"val":null,"statut":"N","signification":"..."}},'
-        f'"EA":{{"val":null,"statut":"N","signification":"..."}},'
-        f'"EeRatio":{{"val":null,"statut":"N","signification":"..."}},'
-        f'"PCP":{{"val":null,"statut":"N","signification":"..."}}}},'
-        f'"analyse":{{"systolique":"...","diastolique":"...","aorte":"...","atrium":"...","pulmonaire":"..."}},'
-        f'"acvim":{{"stade":"A","description":"..."}},'
-        f'"recommandations":{{"suivi":"...","traitement":"...","vigilance":"...","elevage":""}},'
-        f'"conclusion":"..."}}'
+        '{{"mesures":{{"LVIDd":{{"val":null,"statut":"N","signification":"..."}},'
+        '"LVIDs":{{"val":null,"statut":"N","signification":"..."}},'
+        '"IVSd":{{"val":null,"statut":"N","signification":"..."}},'
+        '"PPd":{{"val":null,"statut":"N","signification":"..."}},'
+        '"LVIDdN":{{"val":null,"statut":"N","signification":"..."}},'
+        '"EPR":{{"val":null,"statut":"N","signification":"..."}},'
+        '"FE":{{"val":null,"statut":"N","signification":"..."}},'
+        '"FR":{{"val":null,"statut":"N","signification":"..."}},'
+        '"FC":{{"val":null,"statut":"N","signification":"..."}},'
+        '"DC":{{"val":null,"statut":"N","signification":"..."}},'
+        '"VmaxAo":{{"val":null,"statut":"N","signification":"..."}},'
+        '"GmaxAo":{{"val":null,"statut":"N","signification":"..."}},'
+        '"VmaxAP":{{"val":null,"statut":"N","signification":"..."}},'
+        '"VmaxIM":{{"val":null,"statut":"N","signification":"..."}},'
+        '"OGAo":{{"val":null,"statut":"N","signification":"..."}},'
+        '"EA":{{"val":null,"statut":"N","signification":"..."}},'
+        '"EeRatio":{{"val":null,"statut":"N","signification":"..."}},'
+        '"PCP":{{"val":null,"statut":"N","signification":"..."}}}},'
+        '"analyse":{{"systolique":"...","diastolique":"...","aorte":"...","atrium":"...","pulmonaire":"..."}},'
+        '"acvim":{{"stade":"A","description":"..."}},'
+        '"recommandations":{{"suivi":"...","traitement":"...","vigilance":"...","elevage":""}},'
+        '"conclusion":"..."}}'
     )
 
     try:
@@ -112,17 +112,12 @@ def generate_cr():
     except Exception as e:
         return jsonify({'error': 'Claude API error: ' + str(e)}), 500
 
-        try:
-        # Retirer les balises markdown si présentes
-        clean = txt.strip()
-        if clean.startswith('```'):
-            clean = re.sub(r'^```(?:json)?\n?', '', clean)
-            clean = re.sub(r'\n?```$', '', clean)
-            clean = clean.strip()
+    try:
+        clean = re.sub(r'```json\n?', '', txt).replace('```', '').strip()
         match = re.search(r'\{[\s\S]*\}', clean)
         report = json.loads(match.group(0) if match else clean)
     except Exception as e:
-        return jsonify({'error': 'JSON parse error: ' + str(e), 'raw': txt[:500]}),
+        return jsonify({'error': 'JSON parse error: ' + str(e), 'raw': txt[:500]}), 500
 
     for k, v in rm.items():
         if v is not None and k in report.get('mesures', {}):
