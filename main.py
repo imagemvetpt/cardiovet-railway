@@ -113,7 +113,11 @@ def generate_cr():
         return jsonify({'error': 'Claude API error: ' + str(e)}), 500
 
     try:
-        clean = re.sub(r'```json\n?', '', txt).replace('```', '').strip()
+        clean = txt.strip()
+        if clean.startswith('```'):
+            clean = re.sub(r'^```(?:json)?\n?', '', clean)
+            clean = re.sub(r'\n?```$', '', clean)
+            clean = clean.strip()
         match = re.search(r'\{[\s\S]*\}', clean)
         report = json.loads(match.group(0) if match else clean)
     except Exception as e:
