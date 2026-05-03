@@ -1,2 +1,2 @@
 [phases.setup]
-nixPkgs = ["poppler_utils"]
+nixPkgs = ["python3", "poppler_utils"]
