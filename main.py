@@ -203,12 +203,17 @@ def generate_cr():
     if not key:
         return jsonify({'error': 'CLAUDE_API_KEY not set'}), 500
 
+    # Vision analyse sur les 10 premieres images (eviter timeout)
+    MAX_VISION = 10
     comments = []
-    for i, b64 in enumerate(images_b64):
-        print(f"Vision {i+1}/{len(images_b64)}...")
+    for i, b64 in enumerate(images_b64[:MAX_VISION]):
+        print(f"Vision {i+1}/{min(len(images_b64),MAX_VISION)}...")
         com = comment_single_image(b64, i, patient, key)
         comments.append(com)
         print(f"  [{com.get('statut','?')}] {com.get('caption','?')[:55]}")
+    # Images sans Vision — incluses sans commentaire
+    for i in range(MAX_VISION, len(images_b64)):
+        comments.append({'caption': f'Vue echographique {i+1}', 'comment': '', 'statut': 'N'})
 
     prompt = (
         f"Tu es Dr Vet. Sebastien ROUL, cardiologue veterinaire (N 6603 OMV / MRCVS).\n"
@@ -220,14 +225,11 @@ def generate_cr():
         f"MESURES XML:\n{json.dumps({k:v for k,v in rm.items() if v is not None}, indent=1)}\n\n"
         f"VALEURS PREDITES CORNELL ({weight}kg):\n{json.dumps(cornell, indent=1)}\n\n"
         f"OBSERVATIONS IMAGES IA:\n"
-        + '\n'.join([f"- [{c.get('statut','N')}] {c.get('caption','')}: {c.get('comment','')}" for c in comments])
+        + '\n'.join([f"- [{c.get('statut','N')}] {c.get('caption','')}: {c.get('comment','')}" for c in comments if c.get('comment')])
         + f"\n\nGenere un compte rendu echocardiographique COMPLET et DETAILLE.\n"
-        f"Pour chaque parametre: interprete cliniquement la valeur, compare aux normes, "
-        f"explique la signification physiopathologique si anormal.\n"
-        f"Les sections analyse doivent etre detaillees (3-5 phrases chacune).\n"
-        f"References: Chetboul et al. AJVR 2005 | Thomas et al. AJVR 1993 | ACVIM 2019 | Bussadori 2000.\n"
-        f"Statuts: N=normal, L=limite (10-20%), A=anormal (>20%), C=critique.\n"
-        f"IMPORTANT: signification max 90 caracteres par mesure.\n"
+        f"Pour chaque parametre: interprete cliniquement, compare aux normes, explique la physiopathologie si anormal.\n"
+        f"Sections analyse: 3-5 phrases chacune. References: Chetboul AJVR 2005 | Thomas AJVR 1993 | ACVIM 2019 | Bussadori 2000.\n"
+        f"Statuts: N=normal, L=limite (10-20%), A=anormal (>20%), C=critique. Signification max 90 car.\n"
         f"Reponds UNIQUEMENT en JSON valide sans markdown:\n"
         '{{"mesures":{{"LVIDd":{{"val":null,"statut":"N","signification":"texte court"}},'
         '"LVIDs":{{"val":null,"statut":"N","signification":"texte court"}},'
@@ -247,13 +249,13 @@ def generate_cr():
         '"EA":{{"val":null,"statut":"N","signification":"texte court"}},'
         '"EeRatio":{{"val":null,"statut":"N","signification":"texte court"}},'
         '"PCP":{{"val":null,"statut":"N","signification":"texte court"}}}},'
-        '"analyse":{{"systolique":"analyse detaillee 3-5 phrases","diastolique":"analyse detaillee 3-5 phrases",'
-        '"aorte":"analyse detaillee avec classification SAS si applicable 3-5 phrases",'
-        '"atrium":"analyse detaillee 2-3 phrases","pulmonaire":"analyse detaillee 2-3 phrases"}},'
-        '"acvim":{{"stade":"A","description":"classification complete et justifiee 3-4 phrases"}},'
-        '"recommandations":{{"suivi":"delai et modalites precises avec justification",'
-        '"traitement":"indication precise ou absence justifiee","vigilance":"signes alarme precis","elevage":""}},'
-        '"conclusion":"conclusion diagnostique complete 4-6 phrases synthese avec diagnostic principal et pronostic"}}'
+        '"analyse":{{"systolique":"3-5 phrases","diastolique":"3-5 phrases",'
+        '"aorte":"3-5 phrases avec classification SAS si applicable",'
+        '"atrium":"2-3 phrases","pulmonaire":"2-3 phrases"}},'
+        '"acvim":{{"stade":"A","description":"3-4 phrases justifiees"}},'
+        '"recommandations":{{"suivi":"delai et modalites precises",'
+        '"traitement":"indication ou absence justifiee","vigilance":"signes alarme precis","elevage":""}},'
+        '"conclusion":"4-6 phrases avec diagnostic principal et pronostic"}}'
     )
 
     try:
