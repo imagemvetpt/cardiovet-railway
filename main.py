@@ -1,4 +1,4 @@
-import os, json, re
+import os, json, re, base64, io
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 
@@ -9,25 +9,82 @@ CLAUDE_KEY = os.environ.get('CLAUDE_API_KEY', '')
 
 @app.route('/health', methods=['GET'])
 def health():
-    return jsonify({'status': 'ok', 'service': 'CardioVet CR Generator', 'key_set': bool(CLAUDE_KEY)})
+    return jsonify({'status': 'ok', 'service': 'CardioVet CR Generator v2', 'key_set': bool(CLAUDE_KEY)})
+
+def download_pdf(sb_url, sb_key, file_path):
+    try:
+        import requests
+        url = f"{sb_url}/storage/v1/object/cardiovet-files/{file_path}"
+        r = requests.get(url, headers={'apikey': sb_key, 'Authorization': f'Bearer {sb_key}'}, timeout=30)
+        return r.content if r.status_code == 200 else None
+    except Exception as e:
+        print(f"Download error: {e}")
+        return None
+
+def extract_images(pdf_bytes, max_pages=6):
+    try:
+        from pdf2image import convert_from_bytes
+        from PIL import Image
+        images_b64 = []
+        pages = convert_from_bytes(pdf_bytes, dpi=110, first_page=1, last_page=max_pages, fmt='jpeg')
+        for img in pages:
+            if img.width > 1100:
+                r = 1100 / img.width
+                img = img.resize((1100, int(img.height * r)), Image.LANCZOS)
+            buf = io.BytesIO()
+            img.save(buf, format='JPEG', quality=80)
+            images_b64.append('data:image/jpeg;base64,' + base64.b64encode(buf.getvalue()).decode())
+        return images_b64
+    except Exception as e:
+        print(f"Image extraction error: {e}")
+        return []
+
+def build_images_html(images):
+    if not images:
+        return ''
+    captions = [
+        'Vue parasternale droite — Mode B 2D',
+        'Mode TM — Ventricule gauche',
+        '2D + Doppler couleur — Flux intra-cardiaque',
+        'PW / CW Doppler — Analyse des flux',
+        'DTI — Doppler tissulaire annulaire',
+        'Mode TM + Mesures — Paramètres VG complets',
+    ]
+    html = '<div style="background:#1a3a5c;color:white;padding:6px 12px;font-weight:bold;font-size:11px;margin:14px 0 6px">IMAGES ÉCHOGRAPHIQUES</div>'
+    html += '<p style="font-size:9px;color:#6b7280;margin-bottom:8px">Images issues de l\'examen échographique original (Esaote MyLab).</p>'
+    html += '<table style="width:100%;border-collapse:collapse">'
+    for i in range(0, len(images), 2):
+        html += '<tr>'
+        for j in range(2):
+            idx = i + j
+            if idx < len(images):
+                cap = captions[idx] if idx < len(captions) else f'Image {idx+1}'
+                html += f'<td style="width:50%;padding:4px;vertical-align:top"><img src="{images[idx]}" style="width:100%;border:1px solid #e2e8f0;border-radius:3px;display:block"/><div style="font-size:9px;color:#1a3a5c;font-weight:bold;margin-top:3px;padding:0 2px">{cap}</div></td>'
+            else:
+                html += '<td style="width:50%"></td>'
+        html += '</tr>'
+    html += '</table>'
+    return html
 
 @app.route('/generate-cr', methods=['POST', 'OPTIONS'])
 def generate_cr():
     if request.method == 'OPTIONS':
         return '', 200
-
     try:
         data = request.get_json(force=True)
     except Exception as e:
         return jsonify({'error': 'Invalid JSON: ' + str(e)}), 400
-
     if not data:
-        return jsonify({'error': 'No data received'}), 400
+        return jsonify({'error': 'No data'}), 400
 
-    xml_data = data.get('xmlData', '')
-    patient  = data.get('patient', {})
-    weight   = float(patient.get('weight', 0) or 0)
-    bw_exp   = round(weight ** 0.294, 3) if weight > 0 else None
+    xml_data   = data.get('xmlData', '')
+    patient    = data.get('patient', {})
+    file_path  = data.get('filePath', '')
+    consult_id = data.get('consultId', '')
+    sb_url     = data.get('supabaseUrl', 'https://ddphqsmihbasndmautyu.supabase.co')
+    sb_key     = data.get('supabaseKey', '')
+    weight     = float(patient.get('weight', 0) or 0)
+    bw_exp     = round(weight ** 0.294, 3) if weight > 0 else None
 
     def xm(key):
         r = re.search(r'Description="' + re.escape(key) + r'"[\s\S]*?<MeanValue[^>]*Value="([^"]+)"', xml_data)
@@ -51,7 +108,6 @@ def generate_cr():
         'EeRatio': xm("E/e' Lat"),
         'PCP':   xm('Pression capillaire pulmonaire'),
     }
-
     if rm['LVIDd'] and weight and bw_exp:
         rm['LVIDdN'] = round(rm['LVIDd'] / (bw_exp * 10), 3)
     if rm['PPd'] and rm['LVIDd']:
@@ -60,9 +116,18 @@ def generate_cr():
     cornell = {k: round(c * bw_exp * 10, 1) if bw_exp else None
                for k, c in [('LVIDd', 1.53), ('LVIDs', 0.97), ('IVSd', 0.48), ('PPd', 0.48)]}
 
+    images = []
+    if file_path and sb_key:
+        print(f"Downloading PDF: {file_path}")
+        pdf_bytes = download_pdf(sb_url, sb_key, file_path)
+        if pdf_bytes:
+            print(f"PDF downloaded: {len(pdf_bytes)} bytes")
+            images = extract_images(pdf_bytes)
+            print(f"Images extracted: {len(images)}")
+
     key = CLAUDE_KEY
     if not key:
-        return jsonify({'error': 'CLAUDE_API_KEY not set on server'}), 500
+        return jsonify({'error': 'CLAUDE_API_KEY not set'}), 500
 
     prompt = (
         f"Tu es Dr Vét. Sébastien ROUL, cardiologue vétérinaire (N° 6603 OMV / MRCVS).\n"
@@ -73,31 +138,35 @@ def generate_cr():
         f"Date: {patient.get('date','?')} | Clinique: {patient.get('clinic','ImagemVet')}\n\n"
         f"MESURES XML:\n{json.dumps({k:v for k,v in rm.items() if v is not None}, indent=1)}\n\n"
         f"VALEURS PRÉDITES CORNELL ({weight}kg):\n{json.dumps(cornell, indent=1)}\n\n"
-        f"Génère un compte rendu échocardiographique professionnel complet.\n"
-        f"Statuts: N=normal, L=limite (10-20% hors norme), A=anormal (>20%).\n"
+        f"Génère un compte rendu échocardiographique professionnel et complet.\n"
+        f"Références: Chetboul et al. AJVR 2005 | Thomas et al. AJVR 1993 | ACVIM 2019.\n"
+        f"Statuts: N=normal, L=limite (10-20%), A=anormal (>20%), C=critique.\n"
         f"Réponds UNIQUEMENT en JSON valide sans markdown:\n"
-        '{{"mesures":{{"LVIDd":{{"val":null,"statut":"N","signification":"..."}},'
-        '"LVIDs":{{"val":null,"statut":"N","signification":"..."}},'
-        '"IVSd":{{"val":null,"statut":"N","signification":"..."}},'
-        '"PPd":{{"val":null,"statut":"N","signification":"..."}},'
-        '"LVIDdN":{{"val":null,"statut":"N","signification":"..."}},'
-        '"EPR":{{"val":null,"statut":"N","signification":"..."}},'
-        '"FE":{{"val":null,"statut":"N","signification":"..."}},'
-        '"FR":{{"val":null,"statut":"N","signification":"..."}},'
-        '"FC":{{"val":null,"statut":"N","signification":"..."}},'
-        '"DC":{{"val":null,"statut":"N","signification":"..."}},'
-        '"VmaxAo":{{"val":null,"statut":"N","signification":"..."}},'
-        '"GmaxAo":{{"val":null,"statut":"N","signification":"..."}},'
-        '"VmaxAP":{{"val":null,"statut":"N","signification":"..."}},'
-        '"VmaxIM":{{"val":null,"statut":"N","signification":"..."}},'
-        '"OGAo":{{"val":null,"statut":"N","signification":"..."}},'
-        '"EA":{{"val":null,"statut":"N","signification":"..."}},'
-        '"EeRatio":{{"val":null,"statut":"N","signification":"..."}},'
-        '"PCP":{{"val":null,"statut":"N","signification":"..."}}}},'
-        '"analyse":{{"systolique":"...","diastolique":"...","aorte":"...","atrium":"...","pulmonaire":"..."}},'
-        '"acvim":{{"stade":"A","description":"..."}},'
-        '"recommandations":{{"suivi":"...","traitement":"...","vigilance":"...","elevage":""}},'
-        '"conclusion":"..."}}'
+        '{{"mesures":{{"LVIDd":{{"val":null,"statut":"N","signification":"texte détaillé"}},'
+        '"LVIDs":{{"val":null,"statut":"N","signification":"texte détaillé"}},'
+        '"IVSd":{{"val":null,"statut":"N","signification":"texte détaillé"}},'
+        '"PPd":{{"val":null,"statut":"N","signification":"texte détaillé"}},'
+        '"LVIDdN":{{"val":null,"statut":"N","signification":"texte détaillé"}},'
+        '"EPR":{{"val":null,"statut":"N","signification":"texte détaillé"}},'
+        '"FE":{{"val":null,"statut":"N","signification":"texte détaillé"}},'
+        '"FR":{{"val":null,"statut":"N","signification":"texte détaillé"}},'
+        '"FC":{{"val":null,"statut":"N","signification":"texte détaillé"}},'
+        '"DC":{{"val":null,"statut":"N","signification":"texte détaillé"}},'
+        '"VmaxAo":{{"val":null,"statut":"N","signification":"texte détaillé"}},'
+        '"GmaxAo":{{"val":null,"statut":"N","signification":"texte détaillé"}},'
+        '"VmaxAP":{{"val":null,"statut":"N","signification":"texte détaillé"}},'
+        '"VmaxIM":{{"val":null,"statut":"N","signification":"texte détaillé"}},'
+        '"OGAo":{{"val":null,"statut":"N","signification":"texte détaillé"}},'
+        '"EA":{{"val":null,"statut":"N","signification":"texte détaillé"}},'
+        '"EeRatio":{{"val":null,"statut":"N","signification":"texte détaillé"}},'
+        '"PCP":{{"val":null,"statut":"N","signification":"texte détaillé"}}}},'
+        '"analyse":{{"systolique":"texte détaillé","diastolique":"texte détaillé",'
+        '"aorte":"texte détaillé avec classification SAS si applicable",'
+        '"atrium":"texte détaillé","pulmonaire":"texte détaillé"}},'
+        '"acvim":{{"stade":"A","description":"classification complète et justifiée"}},'
+        '"recommandations":{{"suivi":"délai et modalités précis","traitement":"indication ou absence",'
+        '"vigilance":"signes alarme","elevage":""}},'
+        '"conclusion":"conclusion diagnostique complète"}}'
     )
 
     try:
@@ -127,7 +196,16 @@ def generate_cr():
         if v is not None and k in report.get('mesures', {}):
             report['mesures'][k]['val'] = v
 
-    return jsonify({'success': True, 'report': report, 'weight': weight, 'bw_exp': bw_exp})
+    images_html = build_images_html(images)
+
+    return jsonify({
+        'success': True,
+        'report': report,
+        'images_html': images_html,
+        'images_count': len(images),
+        'weight': weight,
+        'bw_exp': bw_exp
+    })
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8080))
