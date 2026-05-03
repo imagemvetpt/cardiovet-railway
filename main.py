@@ -48,10 +48,10 @@ def build_images_html(images):
         '2D + Doppler couleur — Flux intra-cardiaque',
         'PW / CW Doppler — Analyse des flux',
         'DTI — Doppler tissulaire annulaire',
-        'Mode TM + Mesures — Paramètres VG complets',
+        'Mode TM + Mesures — Parametres VG complets',
     ]
-    html = '<div style="background:#1a3a5c;color:white;padding:6px 12px;font-weight:bold;font-size:11px;margin:14px 0 6px">IMAGES ÉCHOGRAPHIQUES</div>'
-    html += '<p style="font-size:9px;color:#6b7280;margin-bottom:8px">Images issues de l\'examen échographique original (Esaote MyLab).</p>'
+    html = '<div style="background:#1a3a5c;color:white;padding:6px 12px;font-weight:bold;font-size:11px;margin:14px 0 6px">IMAGES ECHOGRAPHIQUES</div>'
+    html += '<p style="font-size:9px;color:#6b7280;margin-bottom:8px">Images issues de l\'examen echographique original (Esaote MyLab).</p>'
     html += '<table style="width:100%;border-collapse:collapse">'
     for i in range(0, len(images), 2):
         html += '<tr>'
@@ -91,14 +91,14 @@ def generate_cr():
         return float(r.group(1)) if r else None
 
     rm = {
-        'LVIDd': xm('Diamètre dias VG') or xm('DdVG'),
-        'LVIDs': xm('Diamètre sys VG') or xm('DsVG'),
+        'LVIDd': xm('Diametre dias VG') or xm('DdVG'),
+        'LVIDs': xm('Diametre sys VG') or xm('DsVG'),
         'IVSd':  xm('SIV diast'),
-        'PPd':   xm('Diamètre paroi post diast VG'),
-        'FE':    xm("Fraction d'éjection"),
+        'PPd':   xm('Diametre paroi post diast VG'),
+        'FE':    xm("Fraction d'ejection"),
         'FR':    xm('Fraction de raccourcissement VG'),
-        'FC':    xm('Fréquence cardiaque'),
-        'DC':    xm('Débit cardiaque'),
+        'FC':    xm('Frequence cardiaque'),
+        'DC':    xm('Debit cardiaque'),
         'VmaxAo': abs(xm('Vmax Ao') or 0) or None,
         'GmaxAo': xm('Gmax Ao'),
         'VmaxAP': abs(xm('Vmax AP') or 0) or None,
@@ -130,43 +130,44 @@ def generate_cr():
         return jsonify({'error': 'CLAUDE_API_KEY not set'}), 500
 
     prompt = (
-        f"Tu es Dr Vét. Sébastien ROUL, cardiologue vétérinaire (N° 6603 OMV / MRCVS).\n"
+        f"Tu es Dr Vet. Sebastien ROUL, cardiologue veterinaire (N 6603 OMV / MRCVS).\n"
         f"Patient: {patient.get('animalName','?')} {patient.get('species','Chien')}"
         f"{' / ' + patient.get('breed','') if patient.get('breed') else ''}, "
-        f"{weight}kg (BW^0,294={bw_exp})\n"
-        f"Propriétaire: {patient.get('firstName','')} {patient.get('lastName','')}\n"
+        f"{weight}kg (BW0.294={bw_exp})\n"
+        f"Proprietaire: {patient.get('firstName','')} {patient.get('lastName','')}\n"
         f"Date: {patient.get('date','?')} | Clinique: {patient.get('clinic','ImagemVet')}\n\n"
         f"MESURES XML:\n{json.dumps({k:v for k,v in rm.items() if v is not None}, indent=1)}\n\n"
-        f"VALEURS PRÉDITES CORNELL ({weight}kg):\n{json.dumps(cornell, indent=1)}\n\n"
-        f"Génère un compte rendu échocardiographique professionnel et complet.\n"
-        f"Références: Chetboul et al. AJVR 2005 | Thomas et al. AJVR 1993 | ACVIM 2019.\n"
+        f"VALEURS PREDITES CORNELL ({weight}kg):\n{json.dumps(cornell, indent=1)}\n\n"
+        f"Genere un compte rendu echocardiographique professionnel et complet.\n"
+        f"References: Chetboul et al. AJVR 2005 | Thomas et al. AJVR 1993 | ACVIM 2019.\n"
         f"Statuts: N=normal, L=limite (10-20%), A=anormal (>20%), C=critique.\n"
-        f"Réponds UNIQUEMENT en JSON valide sans markdown:\n"
-        '{{"mesures":{{"LVIDd":{{"val":null,"statut":"N","signification":"texte détaillé"}},'
-        '"LVIDs":{{"val":null,"statut":"N","signification":"texte détaillé"}},'
-        '"IVSd":{{"val":null,"statut":"N","signification":"texte détaillé"}},'
-        '"PPd":{{"val":null,"statut":"N","signification":"texte détaillé"}},'
-        '"LVIDdN":{{"val":null,"statut":"N","signification":"texte détaillé"}},'
-        '"EPR":{{"val":null,"statut":"N","signification":"texte détaillé"}},'
-        '"FE":{{"val":null,"statut":"N","signification":"texte détaillé"}},'
-        '"FR":{{"val":null,"statut":"N","signification":"texte détaillé"}},'
-        '"FC":{{"val":null,"statut":"N","signification":"texte détaillé"}},'
-        '"DC":{{"val":null,"statut":"N","signification":"texte détaillé"}},'
-        '"VmaxAo":{{"val":null,"statut":"N","signification":"texte détaillé"}},'
-        '"GmaxAo":{{"val":null,"statut":"N","signification":"texte détaillé"}},'
-        '"VmaxAP":{{"val":null,"statut":"N","signification":"texte détaillé"}},'
-        '"VmaxIM":{{"val":null,"statut":"N","signification":"texte détaillé"}},'
-        '"OGAo":{{"val":null,"statut":"N","signification":"texte détaillé"}},'
-        '"EA":{{"val":null,"statut":"N","signification":"texte détaillé"}},'
-        '"EeRatio":{{"val":null,"statut":"N","signification":"texte détaillé"}},'
-        '"PCP":{{"val":null,"statut":"N","signification":"texte détaillé"}}}},'
-        '"analyse":{{"systolique":"texte détaillé","diastolique":"texte détaillé",'
-        '"aorte":"texte détaillé avec classification SAS si applicable",'
-        '"atrium":"texte détaillé","pulmonaire":"texte détaillé"}},'
-        '"acvim":{{"stade":"A","description":"classification complète et justifiée"}},'
-        '"recommandations":{{"suivi":"délai et modalités précis","traitement":"indication ou absence",'
+        f"IMPORTANT: Les valeurs de signification doivent etre courtes (max 80 caracteres).\n"
+        f"Reponds UNIQUEMENT en JSON valide sans markdown:\n"
+        '{{"mesures":{{"LVIDd":{{"val":null,"statut":"N","signification":"court texte"}},'
+        '"LVIDs":{{"val":null,"statut":"N","signification":"court texte"}},'
+        '"IVSd":{{"val":null,"statut":"N","signification":"court texte"}},'
+        '"PPd":{{"val":null,"statut":"N","signification":"court texte"}},'
+        '"LVIDdN":{{"val":null,"statut":"N","signification":"court texte"}},'
+        '"EPR":{{"val":null,"statut":"N","signification":"court texte"}},'
+        '"FE":{{"val":null,"statut":"N","signification":"court texte"}},'
+        '"FR":{{"val":null,"statut":"N","signification":"court texte"}},'
+        '"FC":{{"val":null,"statut":"N","signification":"court texte"}},'
+        '"DC":{{"val":null,"statut":"N","signification":"court texte"}},'
+        '"VmaxAo":{{"val":null,"statut":"N","signification":"court texte"}},'
+        '"GmaxAo":{{"val":null,"statut":"N","signification":"court texte"}},'
+        '"VmaxAP":{{"val":null,"statut":"N","signification":"court texte"}},'
+        '"VmaxIM":{{"val":null,"statut":"N","signification":"court texte"}},'
+        '"OGAo":{{"val":null,"statut":"N","signification":"court texte"}},'
+        '"EA":{{"val":null,"statut":"N","signification":"court texte"}},'
+        '"EeRatio":{{"val":null,"statut":"N","signification":"court texte"}},'
+        '"PCP":{{"val":null,"statut":"N","signification":"court texte"}}}},'
+        '"analyse":{{"systolique":"texte detaille","diastolique":"texte detaille",'
+        '"aorte":"texte detaille avec classification SAS si applicable",'
+        '"atrium":"texte detaille","pulmonaire":"texte detaille"}},'
+        '"acvim":{{"stade":"A","description":"classification complete et justifiee"}},'
+        '"recommandations":{{"suivi":"delai et modalites precis","traitement":"indication ou absence",'
         '"vigilance":"signes alarme","elevage":""}},'
-        '"conclusion":"conclusion diagnostique complète"}}'
+        '"conclusion":"conclusion diagnostique complete"}}'
     )
 
     try:
@@ -181,6 +182,7 @@ def generate_cr():
     except Exception as e:
         return jsonify({'error': 'Claude API error: ' + str(e)}), 500
 
+    json_str = ''
     try:
         clean = txt.strip()
         if clean.startswith('```'):
@@ -188,9 +190,15 @@ def generate_cr():
             clean = re.sub(r'\n?```$', '', clean)
             clean = clean.strip()
         match = re.search(r'\{[\s\S]*\}', clean)
-        report = json.loads(match.group(0) if match else clean)
+        json_str = match.group(0) if match else clean
+        json_str = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]', '', json_str)
+        report = json.loads(json_str)
     except Exception as e:
-        return jsonify({'error': 'JSON parse error: ' + str(e), 'raw': txt[:500]}), 500
+        try:
+            simple = re.sub(r'"signification"\s*:\s*"[^"]*"', '"signification": "voir analyse"', json_str)
+            report = json.loads(simple)
+        except:
+            return jsonify({'error': 'JSON parse error: ' + str(e), 'raw': txt[:500]}), 500
 
     for k, v in rm.items():
         if v is not None and k in report.get('mesures', {}):
