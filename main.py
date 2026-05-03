@@ -9,7 +9,7 @@ CLAUDE_KEY = os.environ.get('CLAUDE_API_KEY', '')
 
 @app.route('/health', methods=['GET'])
 def health():
-    return jsonify({'status': 'ok', 'service': 'CardioVet CR Generator v3', 'key_set': bool(CLAUDE_KEY)})
+    return jsonify({'status': 'ok', 'service': 'CardioVet CR Generator v4', 'key_set': bool(CLAUDE_KEY)})
 
 def download_pdf(sb_url, sb_key, file_path):
     try:
@@ -52,53 +52,74 @@ def extract_images(pdf_bytes, max_pages=8):
         print(f"Image extraction error: {e}")
         return []
 
-def get_image_comments(images_b64, patient_info, key):
-    if not images_b64 or not key:
-        return []
+def comment_single_image(img_b64, image_num, patient_info, key):
     try:
         import anthropic as ac
         client_ai = ac.Anthropic(api_key=key)
-        content = []
-        for i, img_b64 in enumerate(images_b64):
-            content.append({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": img_b64}})
-            content.append({"type": "text", "text": f"[Image {i+1}]"})
-        content.append({"type": "text", "text": (
-            f"Patient: {patient_info.get('animalName','?')}, {patient_info.get('species','Chien')}, {patient_info.get('weight','?')}kg\n\n"
-            "Tu es cardiologue veterinaire. Pour chaque image echographique ci-dessus, "
-            "genere UNE ligne de commentaire diagnostique court (max 120 caracteres) "
-            "decrivant ce que tu observes (type de coupe, flux, anomalie ou normalite).\n"
-            "Reponds UNIQUEMENT en JSON sans markdown:\n"
-            '[{"image":1,"caption":"Vue parasternale droite","comment":"texte court"},'
-            '{"image":2,"caption":"Mode TM","comment":"texte court"}]'
-        )})
+
+        default_views = [
+            'Vue parasternale droite — Mode B 2D',
+            'Mode TM — Ventricule gauche',
+            '2D + Doppler couleur — Flux intra-cardiaque',
+            'PW / CW Doppler — Analyse des flux',
+            'DTI — Doppler tissulaire annulaire',
+            'Mode TM + Mesures — Parametres VG',
+            'Vue sous-costale',
+            'Vue apicale 4 cavites',
+        ]
+        default_caption = default_views[image_num] if image_num < len(default_views) else f'Image {image_num+1}'
+
         msg = client_ai.messages.create(
             model='claude-sonnet-4-6',
-            max_tokens=800,
-            messages=[{'role': 'user', 'content': content}]
+            max_tokens=300,
+            messages=[{
+                'role': 'user',
+                'content': [
+                    {
+                        "type": "image",
+                        "source": {"type": "base64", "media_type": "image/jpeg", "data": img_b64}
+                    },
+                    {
+                        "type": "text",
+                        "text": (
+                            f"Patient: {patient_info.get('animalName','?')}, "
+                            f"{patient_info.get('species','Chien')}, {patient_info.get('weight','?')}kg.\n\n"
+                            f"Tu es cardiologue veterinaire expert en echocardiographie canine et feline.\n"
+                            f"Analyse cette image echographique (image {image_num+1}) et reponds en JSON:\n"
+                            f'{{"caption":"nom court de la vue (ex: Vue parasternale grand axe)","comment":"observation diagnostique en 1 phrase max 150 caracteres"}}\n'
+                            f"Pas de markdown, JSON uniquement."
+                        )
+                    }
+                ]
+            }]
         )
-        txt = msg.content[0].text if msg.content else '[]'
+        txt = msg.content[0].text if msg.content else ''
         clean = re.sub(r'```json\n?', '', txt).replace('```', '').strip()
-        match = re.search(r'\[[\s\S]*\]', clean)
-        return json.loads(match.group(0) if match else clean)
+        match = re.search(r'\{[^}]+\}', clean)
+        if match:
+            result = json.loads(match.group(0))
+            return {
+                'caption': result.get('caption', default_caption),
+                'comment': result.get('comment', '')
+            }
+        return {'caption': default_caption, 'comment': ''}
     except Exception as e:
-        print(f"Vision error: {e}")
-        return []
+        print(f"Vision error image {image_num+1}: {e}")
+        default_views = [
+            'Vue parasternale droite — Mode B 2D',
+            'Mode TM — Ventricule gauche',
+            '2D + Doppler couleur — Flux intra-cardiaque',
+            'PW / CW Doppler — Analyse des flux',
+            'DTI — Doppler tissulaire annulaire',
+            'Mode TM + Mesures — Parametres VG',
+        ]
+        return {'caption': default_views[image_num] if image_num < len(default_views) else f'Image {image_num+1}', 'comment': ''}
 
 def build_images_html(images_b64, comments):
     if not images_b64:
         return ''
-    default_captions = [
-        'Vue parasternale droite — Mode B 2D',
-        'Mode TM — Ventricule gauche',
-        '2D + Doppler couleur — Flux intra-cardiaque',
-        'PW / CW Doppler — Analyse des flux',
-        'DTI — Doppler tissulaire annulaire',
-        'Mode TM + Mesures — Parametres VG',
-        'Vue sous-costale',
-        'Vue apicale 4 cavites',
-    ]
     html = '<div style="background:#1a3a5c;color:white;padding:6px 12px;font-weight:bold;font-size:11px;margin:14px 0 6px">IMAGES ECHOGRAPHIQUES</div>'
-    html += '<p style="font-size:9px;color:#6b7280;margin-bottom:8px">Images echographiques originales (Esaote MyLab) avec interpretation automatique.</p>'
+    html += '<p style="font-size:9px;color:#6b7280;margin-bottom:8px">Images echographiques originales (Esaote MyLab) avec interpretation par IA.</p>'
     html += '<table style="width:100%;border-collapse:collapse">'
     for i in range(0, len(images_b64), 2):
         html += '<tr>'
@@ -106,14 +127,14 @@ def build_images_html(images_b64, comments):
             idx = i + j
             if idx < len(images_b64):
                 com = comments[idx] if idx < len(comments) else {}
-                caption = com.get('caption', default_captions[idx] if idx < len(default_captions) else f'Image {idx+1}')
+                caption = com.get('caption', f'Image {idx+1}')
                 comment = com.get('comment', '')
                 img_data = f'data:image/jpeg;base64,{images_b64[idx]}'
                 html += (
                     f'<td style="width:50%;padding:5px;vertical-align:top">'
                     f'<img src="{img_data}" style="width:100%;border:1px solid #e2e8f0;border-radius:3px;display:block"/>'
-                    f'<div style="font-size:9px;color:#1a3a5c;font-weight:bold;margin-top:3px">{caption}</div>'
-                    + (f'<div style="font-size:8px;color:#374151;margin-top:2px;font-style:italic">{comment}</div>' if comment else '')
+                    f'<div style="font-size:9px;color:#1a3a5c;font-weight:bold;margin-top:4px;padding:2px 0">{caption}</div>'
+                    + (f'<div style="font-size:8px;color:#374151;margin-top:2px;font-style:italic;line-height:1.4">{comment}</div>' if comment else '')
                     + '</td>'
                 )
             else:
@@ -185,8 +206,11 @@ def generate_cr():
         return jsonify({'error': 'CLAUDE_API_KEY not set'}), 500
 
     comments = []
-    if images_b64:
-        comments = get_image_comments(images_b64, patient, key)
+    for i, img_b64 in enumerate(images_b64):
+        print(f"Analysing image {i+1}/{len(images_b64)}...")
+        com = comment_single_image(img_b64, i, patient, key)
+        comments.append(com)
+        print(f"  -> {com.get('caption','?')}: {com.get('comment','')[:60]}")
 
     prompt = (
         f"Tu es Dr Vet. Sebastien ROUL, cardiologue veterinaire (N 6603 OMV / MRCVS).\n"
