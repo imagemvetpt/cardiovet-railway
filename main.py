@@ -42,19 +42,24 @@ def split_page_into_quadrants(img):
     """Decoupe une page Esaote en 6 vues individuelles (grille 2x3)"""
     from PIL import Image
     w, h = img.size
-    top_offset = int(h * 0.08)
-    bottom_offset = int(h * 0.03)
+    # Header Esaote (patient info) = ~12% du haut, footer = ~4% du bas
+    top_offset = int(h * 0.12)
+    bottom_offset = int(h * 0.04)
     usable_h = h - top_offset - bottom_offset
     half_w = w // 2
     third_h = usable_h // 3
 
+    # Marge interne pour eviter de couper sur les bordures entre images
+    margin_x = int(w * 0.005)
+    margin_y = int(h * 0.005)
+
     views = []
     for row in range(3):
         for col in range(2):
-            x1 = col * half_w
-            y1 = top_offset + row * third_h
-            x2 = x1 + half_w
-            y2 = y1 + third_h
+            x1 = col * half_w + margin_x
+            y1 = top_offset + row * third_h + margin_y
+            x2 = x1 + half_w - margin_x * 2
+            y2 = y1 + third_h - margin_y * 2
             views.append(img.crop((x1, y1, x2, y2)))
     return views
 
