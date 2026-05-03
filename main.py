@@ -112,12 +112,17 @@ def generate_cr():
     except Exception as e:
         return jsonify({'error': 'Claude API error: ' + str(e)}), 500
 
-    try:
-        clean = re.sub(r'```json\n?', '', txt).replace('```', '').strip()
+        try:
+        # Retirer les balises markdown si présentes
+        clean = txt.strip()
+        if clean.startswith('```'):
+            clean = re.sub(r'^```(?:json)?\n?', '', clean)
+            clean = re.sub(r'\n?```$', '', clean)
+            clean = clean.strip()
         match = re.search(r'\{[\s\S]*\}', clean)
         report = json.loads(match.group(0) if match else clean)
     except Exception as e:
-        return jsonify({'error': 'JSON parse error: ' + str(e), 'raw': txt[:500]}), 500
+        return jsonify({'error': 'JSON parse error: ' + str(e), 'raw': txt[:500]}),
 
     for k, v in rm.items():
         if v is not None and k in report.get('mesures', {}):
