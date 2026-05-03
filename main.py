@@ -9,7 +9,7 @@ CLAUDE_KEY = os.environ.get('CLAUDE_API_KEY', '')
 
 @app.route('/health', methods=['GET'])
 def health():
-    return jsonify({'status': 'ok', 'service': 'CardioVet CR Generator v4', 'key_set': bool(CLAUDE_KEY)})
+    return jsonify({'status': 'ok', 'service': 'CardioVet CR Generator v5', 'key_set': bool(CLAUDE_KEY)})
 
 def download_pdf(sb_url, sb_key, file_path):
     try:
@@ -21,57 +21,86 @@ def download_pdf(sb_url, sb_key, file_path):
         print(f"Download error: {e}")
         return None
 
-def is_image_page(img):
+def is_echo_image(img):
+    gray = img.convert('L')
+    pixels = list(gray.getdata())
+    avg = sum(pixels) / len(pixels)
+    light_pixels = sum(1 for p in pixels if p > 50)
+    light_ratio = light_pixels / len(pixels)
+    return light_ratio > 0.05 and avg > 5
+
+def is_dark_page(img):
     gray = img.convert('L')
     pixels = list(gray.getdata())
     avg = sum(pixels) / len(pixels)
     dark_pixels = sum(1 for p in pixels if p < 80)
     dark_ratio = dark_pixels / len(pixels)
     print(f"  avg={avg:.0f}, dark_ratio={dark_ratio:.2f}")
-    return avg < 120 and dark_ratio > 0.40
+    return avg < 130 and dark_ratio > 0.35
 
-def extract_images(pdf_bytes, max_pages=8):
+def split_page_into_quadrants(img):
+    """Decoupe une page Esaote en 6 vues individuelles (grille 2x3)"""
+    from PIL import Image
+    w, h = img.size
+    top_offset = int(h * 0.08)
+    bottom_offset = int(h * 0.03)
+    usable_h = h - top_offset - bottom_offset
+    half_w = w // 2
+    third_h = usable_h // 3
+
+    views = []
+    for row in range(3):
+        for col in range(2):
+            x1 = col * half_w
+            y1 = top_offset + row * third_h
+            x2 = x1 + half_w
+            y2 = y1 + third_h
+            views.append(img.crop((x1, y1, x2, y2)))
+    return views
+
+def extract_individual_views(pdf_bytes, max_pages=8):
     try:
         from pdf2image import convert_from_bytes
         from PIL import Image
-        images_b64 = []
-        pages = convert_from_bytes(pdf_bytes, dpi=120, first_page=1, last_page=max_pages, fmt='jpeg')
-        for i, img in enumerate(pages):
-            if not is_image_page(img):
-                print(f"Page {i+1}: ignoree")
+        views_b64 = []
+        pages = convert_from_bytes(pdf_bytes, dpi=150, first_page=1, last_page=max_pages, fmt='jpeg')
+
+        for i, page in enumerate(pages):
+            if not is_dark_page(page):
+                print(f"Page {i+1}: texte ignoree")
                 continue
-            print(f"Page {i+1}: conservee")
-            if img.width > 1200:
-                r = 1200 / img.width
-                img = img.resize((1200, int(img.height * r)), Image.LANCZOS)
-            buf = io.BytesIO()
-            img.save(buf, format='JPEG', quality=82)
-            images_b64.append(base64.b64encode(buf.getvalue()).decode())
-        return images_b64
+            print(f"Page {i+1}: decoupage en vues individuelles")
+
+            views = split_page_into_quadrants(page)
+            for q_idx, view in enumerate(views):
+                if not is_echo_image(view):
+                    print(f"  Vue {q_idx+1}: vide, ignoree")
+                    continue
+                target_w = 800
+                if view.width > target_w:
+                    ratio = target_w / view.width
+                    view = view.resize((target_w, int(view.height * ratio)), Image.LANCZOS)
+                buf = io.BytesIO()
+                view.save(buf, format='JPEG', quality=85)
+                views_b64.append(base64.b64encode(buf.getvalue()).decode())
+                print(f"  Vue {q_idx+1}: conservee ({view.width}x{view.height})")
+
+        print(f"Total vues extraites: {len(views_b64)}")
+        return views_b64
     except Exception as e:
-        print(f"Image extraction error: {e}")
+        print(f"Extraction error: {e}")
+        import traceback
+        traceback.print_exc()
         return []
 
-def comment_single_image(img_b64, image_num, patient_info, key):
+def comment_single_view(img_b64, view_num, patient_info, key):
     try:
         import anthropic as ac
         client_ai = ac.Anthropic(api_key=key)
 
-        default_views = [
-            'Vue parasternale droite — Mode B 2D',
-            'Mode TM — Ventricule gauche',
-            '2D + Doppler couleur — Flux intra-cardiaque',
-            'PW / CW Doppler — Analyse des flux',
-            'DTI — Doppler tissulaire annulaire',
-            'Mode TM + Mesures — Parametres VG',
-            'Vue sous-costale',
-            'Vue apicale 4 cavites',
-        ]
-        default_caption = default_views[image_num] if image_num < len(default_views) else f'Image {image_num+1}'
-
         msg = client_ai.messages.create(
             model='claude-sonnet-4-6',
-            max_tokens=300,
+            max_tokens=250,
             messages=[{
                 'role': 'user',
                 'content': [
@@ -84,61 +113,64 @@ def comment_single_image(img_b64, image_num, patient_info, key):
                         "text": (
                             f"Patient: {patient_info.get('animalName','?')}, "
                             f"{patient_info.get('species','Chien')}, {patient_info.get('weight','?')}kg.\n\n"
-                            f"Tu es cardiologue veterinaire expert en echocardiographie canine et feline.\n"
-                            f"Analyse cette image echographique (image {image_num+1}) et reponds en JSON:\n"
-                            f'{{"caption":"nom court de la vue (ex: Vue parasternale grand axe)","comment":"observation diagnostique en 1 phrase max 150 caracteres"}}\n'
-                            f"Pas de markdown, JSON uniquement."
+                            "Tu es cardiologue veterinaire expert en echocardiographie canine et feline.\n"
+                            "Identifie le type de coupe/mode echographique et fais une observation diagnostique courte.\n"
+                            "Reponds UNIQUEMENT en JSON (pas de markdown):\n"
+                            '{"caption":"type de vue court ex: Parasternale droite grand axe Mode B","comment":"observation diagnostique 1 phrase max 120 car"}'
                         )
                     }
                 ]
             }]
         )
         txt = msg.content[0].text if msg.content else ''
-        clean = re.sub(r'```json\n?', '', txt).replace('```', '').strip()
-        match = re.search(r'\{[^}]+\}', clean)
+        clean = re.sub(r'```(?:json)?\n?', '', txt).replace('```', '').strip()
+        match = re.search(r'\{[^{}]+\}', clean)
         if match:
             result = json.loads(match.group(0))
             return {
-                'caption': result.get('caption', default_caption),
+                'caption': result.get('caption', f'Vue {view_num+1}'),
                 'comment': result.get('comment', '')
             }
-        return {'caption': default_caption, 'comment': ''}
+        return {'caption': f'Vue echographique {view_num+1}', 'comment': ''}
     except Exception as e:
-        print(f"Vision error image {image_num+1}: {e}")
-        default_views = [
-            'Vue parasternale droite — Mode B 2D',
-            'Mode TM — Ventricule gauche',
-            '2D + Doppler couleur — Flux intra-cardiaque',
-            'PW / CW Doppler — Analyse des flux',
-            'DTI — Doppler tissulaire annulaire',
-            'Mode TM + Mesures — Parametres VG',
-        ]
-        return {'caption': default_views[image_num] if image_num < len(default_views) else f'Image {image_num+1}', 'comment': ''}
+        print(f"Vision error vue {view_num+1}: {e}")
+        return {'caption': f'Vue echographique {view_num+1}', 'comment': ''}
 
-def build_images_html(images_b64, comments):
-    if not images_b64:
+def build_images_html(views_b64, comments):
+    if not views_b64:
         return ''
-    html = '<div style="background:#1a3a5c;color:white;padding:6px 12px;font-weight:bold;font-size:11px;margin:14px 0 6px">IMAGES ECHOGRAPHIQUES</div>'
-    html += '<p style="font-size:9px;color:#6b7280;margin-bottom:8px">Images echographiques originales (Esaote MyLab) avec interpretation par IA.</p>'
-    html += '<table style="width:100%;border-collapse:collapse">'
-    for i in range(0, len(images_b64), 2):
+    html = (
+        '<div style="background:#1a3a5c;color:white;padding:6px 12px;font-weight:bold;'
+        'font-size:11px;margin:14px 0 6px">IMAGES ECHOGRAPHIQUES</div>'
+        '<p style="font-size:9px;color:#6b7280;margin-bottom:10px">'
+        'Vues echographiques individuelles (Esaote MyLab) — interpretation automatique par IA.</p>'
+        '<table style="width:100%;border-collapse:collapse;margin-bottom:12px">'
+    )
+    for i in range(0, len(views_b64), 2):
         html += '<tr>'
         for j in range(2):
             idx = i + j
-            if idx < len(images_b64):
+            if idx < len(views_b64):
                 com = comments[idx] if idx < len(comments) else {}
-                caption = com.get('caption', f'Image {idx+1}')
+                caption = com.get('caption', f'Vue {idx+1}')
                 comment = com.get('comment', '')
-                img_data = f'data:image/jpeg;base64,{images_b64[idx]}'
+                img_data = f'data:image/jpeg;base64,{views_b64[idx]}'
                 html += (
-                    f'<td style="width:50%;padding:5px;vertical-align:top">'
-                    f'<img src="{img_data}" style="width:100%;border:1px solid #e2e8f0;border-radius:3px;display:block"/>'
-                    f'<div style="font-size:9px;color:#1a3a5c;font-weight:bold;margin-top:4px;padding:2px 0">{caption}</div>'
-                    + (f'<div style="font-size:8px;color:#374151;margin-top:2px;font-style:italic;line-height:1.4">{comment}</div>' if comment else '')
+                    f'<td style="width:50%;padding:6px;vertical-align:top;'
+                    f'border:1px solid #e5e7eb;background:#f9fafb">'
+                    f'<img src="{img_data}" style="width:100%;border-radius:3px;display:block;'
+                    f'border:1px solid #1a3a5c"/>'
+                    f'<div style="background:#1a3a5c;color:white;font-size:9px;font-weight:bold;'
+                    f'padding:3px 6px;margin-top:0;border-radius:0 0 3px 3px">{caption}</div>'
+                    + (
+                        f'<div style="font-size:8px;color:#1e3a5f;margin-top:4px;'
+                        f'font-style:italic;line-height:1.5;padding:0 2px">'
+                        f'&#x1F50D; {comment}</div>' if comment else ''
+                    )
                     + '</td>'
                 )
             else:
-                html += '<td style="width:50%"></td>'
+                html += '<td style="width:50%;padding:6px"></td>'
         html += '</tr>'
     html += '</table>'
     return html
@@ -193,24 +225,23 @@ def generate_cr():
     cornell = {k: round(c * bw_exp * 10, 1) if bw_exp else None
                for k, c in [('LVIDd', 1.53), ('LVIDs', 0.97), ('IVSd', 0.48), ('PPd', 0.48)]}
 
-    images_b64 = []
+    views_b64 = []
     if file_path and sb_key:
         pdf_bytes = download_pdf(sb_url, sb_key, file_path)
         if pdf_bytes:
             print(f"PDF: {len(pdf_bytes)} bytes")
-            images_b64 = extract_images(pdf_bytes, max_pages=10)
-            print(f"Images: {len(images_b64)}")
+            views_b64 = extract_individual_views(pdf_bytes, max_pages=10)
 
     key = CLAUDE_KEY
     if not key:
         return jsonify({'error': 'CLAUDE_API_KEY not set'}), 500
 
     comments = []
-    for i, img_b64 in enumerate(images_b64):
-        print(f"Analysing image {i+1}/{len(images_b64)}...")
-        com = comment_single_image(img_b64, i, patient, key)
+    for i, v_b64 in enumerate(views_b64[:8]):
+        print(f"Vision image {i+1}/{min(len(views_b64),8)}...")
+        com = comment_single_view(v_b64, i, patient, key)
         comments.append(com)
-        print(f"  -> {com.get('caption','?')}: {com.get('comment','')[:60]}")
+        print(f"  {com.get('caption','?')[:50]}")
 
     prompt = (
         f"Tu es Dr Vet. Sebastien ROUL, cardiologue veterinaire (N 6603 OMV / MRCVS).\n"
@@ -224,32 +255,30 @@ def generate_cr():
         f"Genere un compte rendu echocardiographique professionnel et complet.\n"
         f"References: Chetboul et al. AJVR 2005 | Thomas et al. AJVR 1993 | ACVIM 2019.\n"
         f"Statuts: N=normal, L=limite (10-20%), A=anormal (>20%), C=critique.\n"
-        f"IMPORTANT: valeurs signification max 80 caracteres.\n"
+        f"IMPORTANT: signification max 80 caracteres.\n"
         f"Reponds UNIQUEMENT en JSON valide sans markdown:\n"
-        '{{"mesures":{{"LVIDd":{{"val":null,"statut":"N","signification":"court texte"}},'
-        '"LVIDs":{{"val":null,"statut":"N","signification":"court texte"}},'
-        '"IVSd":{{"val":null,"statut":"N","signification":"court texte"}},'
-        '"PPd":{{"val":null,"statut":"N","signification":"court texte"}},'
-        '"LVIDdN":{{"val":null,"statut":"N","signification":"court texte"}},'
-        '"EPR":{{"val":null,"statut":"N","signification":"court texte"}},'
-        '"FE":{{"val":null,"statut":"N","signification":"court texte"}},'
-        '"FR":{{"val":null,"statut":"N","signification":"court texte"}},'
-        '"FC":{{"val":null,"statut":"N","signification":"court texte"}},'
-        '"DC":{{"val":null,"statut":"N","signification":"court texte"}},'
-        '"VmaxAo":{{"val":null,"statut":"N","signification":"court texte"}},'
-        '"GmaxAo":{{"val":null,"statut":"N","signification":"court texte"}},'
-        '"VmaxAP":{{"val":null,"statut":"N","signification":"court texte"}},'
-        '"VmaxIM":{{"val":null,"statut":"N","signification":"court texte"}},'
-        '"OGAo":{{"val":null,"statut":"N","signification":"court texte"}},'
-        '"EA":{{"val":null,"statut":"N","signification":"court texte"}},'
-        '"EeRatio":{{"val":null,"statut":"N","signification":"court texte"}},'
-        '"PCP":{{"val":null,"statut":"N","signification":"court texte"}}}},'
-        '"analyse":{{"systolique":"texte detaille","diastolique":"texte detaille",'
-        '"aorte":"texte detaille","atrium":"texte detaille","pulmonaire":"texte detaille"}},'
-        '"acvim":{{"stade":"A","description":"classification complete"}},'
-        '"recommandations":{{"suivi":"delai precis","traitement":"indication ou absence",'
-        '"vigilance":"signes alarme","elevage":""}},'
-        '"conclusion":"conclusion diagnostique complete"}}'
+        '{{"mesures":{{"LVIDd":{{"val":null,"statut":"N","signification":"court"}},'
+        '"LVIDs":{{"val":null,"statut":"N","signification":"court"}},'
+        '"IVSd":{{"val":null,"statut":"N","signification":"court"}},'
+        '"PPd":{{"val":null,"statut":"N","signification":"court"}},'
+        '"LVIDdN":{{"val":null,"statut":"N","signification":"court"}},'
+        '"EPR":{{"val":null,"statut":"N","signification":"court"}},'
+        '"FE":{{"val":null,"statut":"N","signification":"court"}},'
+        '"FR":{{"val":null,"statut":"N","signification":"court"}},'
+        '"FC":{{"val":null,"statut":"N","signification":"court"}},'
+        '"DC":{{"val":null,"statut":"N","signification":"court"}},'
+        '"VmaxAo":{{"val":null,"statut":"N","signification":"court"}},'
+        '"GmaxAo":{{"val":null,"statut":"N","signification":"court"}},'
+        '"VmaxAP":{{"val":null,"statut":"N","signification":"court"}},'
+        '"VmaxIM":{{"val":null,"statut":"N","signification":"court"}},'
+        '"OGAo":{{"val":null,"statut":"N","signification":"court"}},'
+        '"EA":{{"val":null,"statut":"N","signification":"court"}},'
+        '"EeRatio":{{"val":null,"statut":"N","signification":"court"}},'
+        '"PCP":{{"val":null,"statut":"N","signification":"court"}}}},'
+        '"analyse":{{"systolique":"detail","diastolique":"detail","aorte":"detail","atrium":"detail","pulmonaire":"detail"}},'
+        '"acvim":{{"stade":"A","description":"detail"}},'
+        '"recommandations":{{"suivi":"detail","traitement":"detail","vigilance":"detail","elevage":""}},'
+        '"conclusion":"conclusion complete"}}'
     )
 
     try:
@@ -286,13 +315,13 @@ def generate_cr():
         if v is not None and k in report.get('mesures', {}):
             report['mesures'][k]['val'] = v
 
-    images_html = build_images_html(images_b64, comments)
+    images_html = build_images_html(views_b64[:8], comments)
 
     return jsonify({
         'success': True,
         'report': report,
         'images_html': images_html,
-        'images_count': len(images_b64),
+        'images_count': len(views_b64),
         'weight': weight,
         'bw_exp': bw_exp
     })
