@@ -9,7 +9,7 @@ CLAUDE_KEY = os.environ.get('CLAUDE_API_KEY', '')
 
 @app.route('/health', methods=['GET'])
 def health():
-    return jsonify({'status': 'ok', 'service': 'CardioVet CR Generator v2', 'key_set': bool(CLAUDE_KEY)})
+    return jsonify({'status': 'ok', 'service': 'CardioVet CR Generator v3', 'key_set': bool(CLAUDE_KEY)})
 
 def download_pdf(sb_url, sb_key, file_path):
     try:
@@ -21,45 +21,98 @@ def download_pdf(sb_url, sb_key, file_path):
         print(f"Download error: {e}")
         return None
 
-def extract_images(pdf_bytes, max_pages=6):
+def is_image_page(img):
+    gray = img.convert('L')
+    pixels = list(gray.getdata())
+    avg = sum(pixels) / len(pixels)
+    return avg < 180
+
+def extract_images(pdf_bytes, max_pages=8):
     try:
         from pdf2image import convert_from_bytes
         from PIL import Image
         images_b64 = []
-        pages = convert_from_bytes(pdf_bytes, dpi=110, first_page=1, last_page=max_pages, fmt='jpeg')
-        for img in pages:
-            if img.width > 1100:
-                r = 1100 / img.width
-                img = img.resize((1100, int(img.height * r)), Image.LANCZOS)
+        pages = convert_from_bytes(pdf_bytes, dpi=120, first_page=1, last_page=max_pages, fmt='jpeg')
+        for i, img in enumerate(pages):
+            if not is_image_page(img):
+                print(f"Page {i+1}: texte ignoree")
+                continue
+            print(f"Page {i+1}: image conservee")
+            if img.width > 1200:
+                r = 1200 / img.width
+                img = img.resize((1200, int(img.height * r)), Image.LANCZOS)
             buf = io.BytesIO()
-            img.save(buf, format='JPEG', quality=80)
-            images_b64.append('data:image/jpeg;base64,' + base64.b64encode(buf.getvalue()).decode())
+            img.save(buf, format='JPEG', quality=82)
+            images_b64.append(base64.b64encode(buf.getvalue()).decode())
         return images_b64
     except Exception as e:
         print(f"Image extraction error: {e}")
         return []
 
-def build_images_html(images):
-    if not images:
+def get_image_comments(images_b64, patient_info, key):
+    if not images_b64 or not key:
+        return []
+    try:
+        import anthropic as ac
+        client_ai = ac.Anthropic(api_key=key)
+        content = []
+        for i, img_b64 in enumerate(images_b64):
+            content.append({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": img_b64}})
+            content.append({"type": "text", "text": f"[Image {i+1}]"})
+        content.append({"type": "text", "text": (
+            f"Patient: {patient_info.get('animalName','?')}, {patient_info.get('species','Chien')}, {patient_info.get('weight','?')}kg\n\n"
+            "Tu es cardiologue veterinaire. Pour chaque image echographique ci-dessus, "
+            "genere UNE ligne de commentaire diagnostique court (max 120 caracteres) "
+            "decrivant ce que tu observes (type de coupe, flux, anomalie ou normalite).\n"
+            "Reponds UNIQUEMENT en JSON sans markdown:\n"
+            '[{"image":1,"caption":"Vue parasternale droite","comment":"texte court"},'
+            '{"image":2,"caption":"Mode TM","comment":"texte court"}]'
+        )})
+        msg = client_ai.messages.create(
+            model='claude-sonnet-4-6',
+            max_tokens=800,
+            messages=[{'role': 'user', 'content': content}]
+        )
+        txt = msg.content[0].text if msg.content else '[]'
+        clean = re.sub(r'```json\n?', '', txt).replace('```', '').strip()
+        match = re.search(r'\[[\s\S]*\]', clean)
+        return json.loads(match.group(0) if match else clean)
+    except Exception as e:
+        print(f"Vision error: {e}")
+        return []
+
+def build_images_html(images_b64, comments):
+    if not images_b64:
         return ''
-    captions = [
+    default_captions = [
         'Vue parasternale droite — Mode B 2D',
         'Mode TM — Ventricule gauche',
         '2D + Doppler couleur — Flux intra-cardiaque',
         'PW / CW Doppler — Analyse des flux',
         'DTI — Doppler tissulaire annulaire',
-        'Mode TM + Mesures — Parametres VG complets',
+        'Mode TM + Mesures — Parametres VG',
+        'Vue sous-costale',
+        'Vue apicale 4 cavites',
     ]
     html = '<div style="background:#1a3a5c;color:white;padding:6px 12px;font-weight:bold;font-size:11px;margin:14px 0 6px">IMAGES ECHOGRAPHIQUES</div>'
-    html += '<p style="font-size:9px;color:#6b7280;margin-bottom:8px">Images issues de l\'examen echographique original (Esaote MyLab).</p>'
+    html += '<p style="font-size:9px;color:#6b7280;margin-bottom:8px">Images echographiques originales (Esaote MyLab) avec interpretation automatique.</p>'
     html += '<table style="width:100%;border-collapse:collapse">'
-    for i in range(0, len(images), 2):
+    for i in range(0, len(images_b64), 2):
         html += '<tr>'
         for j in range(2):
             idx = i + j
-            if idx < len(images):
-                cap = captions[idx] if idx < len(captions) else f'Image {idx+1}'
-                html += f'<td style="width:50%;padding:4px;vertical-align:top"><img src="{images[idx]}" style="width:100%;border:1px solid #e2e8f0;border-radius:3px;display:block"/><div style="font-size:9px;color:#1a3a5c;font-weight:bold;margin-top:3px;padding:0 2px">{cap}</div></td>'
+            if idx < len(images_b64):
+                com = comments[idx] if idx < len(comments) else {}
+                caption = com.get('caption', default_captions[idx] if idx < len(default_captions) else f'Image {idx+1}')
+                comment = com.get('comment', '')
+                img_data = f'data:image/jpeg;base64,{images_b64[idx]}'
+                html += (
+                    f'<td style="width:50%;padding:5px;vertical-align:top">'
+                    f'<img src="{img_data}" style="width:100%;border:1px solid #e2e8f0;border-radius:3px;display:block"/>'
+                    f'<div style="font-size:9px;color:#1a3a5c;font-weight:bold;margin-top:3px">{caption}</div>'
+                    + (f'<div style="font-size:8px;color:#374151;margin-top:2px;font-style:italic">{comment}</div>' if comment else '')
+                    + '</td>'
+                )
             else:
                 html += '<td style="width:50%"></td>'
         html += '</tr>'
@@ -116,18 +169,21 @@ def generate_cr():
     cornell = {k: round(c * bw_exp * 10, 1) if bw_exp else None
                for k, c in [('LVIDd', 1.53), ('LVIDs', 0.97), ('IVSd', 0.48), ('PPd', 0.48)]}
 
-    images = []
+    images_b64 = []
     if file_path and sb_key:
-        print(f"Downloading PDF: {file_path}")
         pdf_bytes = download_pdf(sb_url, sb_key, file_path)
         if pdf_bytes:
-            print(f"PDF downloaded: {len(pdf_bytes)} bytes")
-            images = extract_images(pdf_bytes)
-            print(f"Images extracted: {len(images)}")
+            print(f"PDF: {len(pdf_bytes)} bytes")
+            images_b64 = extract_images(pdf_bytes, max_pages=10)
+            print(f"Images: {len(images_b64)}")
 
     key = CLAUDE_KEY
     if not key:
         return jsonify({'error': 'CLAUDE_API_KEY not set'}), 500
+
+    comments = []
+    if images_b64:
+        comments = get_image_comments(images_b64, patient, key)
 
     prompt = (
         f"Tu es Dr Vet. Sebastien ROUL, cardiologue veterinaire (N 6603 OMV / MRCVS).\n"
@@ -141,7 +197,7 @@ def generate_cr():
         f"Genere un compte rendu echocardiographique professionnel et complet.\n"
         f"References: Chetboul et al. AJVR 2005 | Thomas et al. AJVR 1993 | ACVIM 2019.\n"
         f"Statuts: N=normal, L=limite (10-20%), A=anormal (>20%), C=critique.\n"
-        f"IMPORTANT: Les valeurs de signification doivent etre courtes (max 80 caracteres).\n"
+        f"IMPORTANT: valeurs signification max 80 caracteres.\n"
         f"Reponds UNIQUEMENT en JSON valide sans markdown:\n"
         '{{"mesures":{{"LVIDd":{{"val":null,"statut":"N","signification":"court texte"}},'
         '"LVIDs":{{"val":null,"statut":"N","signification":"court texte"}},'
@@ -162,10 +218,9 @@ def generate_cr():
         '"EeRatio":{{"val":null,"statut":"N","signification":"court texte"}},'
         '"PCP":{{"val":null,"statut":"N","signification":"court texte"}}}},'
         '"analyse":{{"systolique":"texte detaille","diastolique":"texte detaille",'
-        '"aorte":"texte detaille avec classification SAS si applicable",'
-        '"atrium":"texte detaille","pulmonaire":"texte detaille"}},'
-        '"acvim":{{"stade":"A","description":"classification complete et justifiee"}},'
-        '"recommandations":{{"suivi":"delai et modalites precis","traitement":"indication ou absence",'
+        '"aorte":"texte detaille","atrium":"texte detaille","pulmonaire":"texte detaille"}},'
+        '"acvim":{{"stade":"A","description":"classification complete"}},'
+        '"recommandations":{{"suivi":"delai precis","traitement":"indication ou absence",'
         '"vigilance":"signes alarme","elevage":""}},'
         '"conclusion":"conclusion diagnostique complete"}}'
     )
@@ -204,13 +259,13 @@ def generate_cr():
         if v is not None and k in report.get('mesures', {}):
             report['mesures'][k]['val'] = v
 
-    images_html = build_images_html(images)
+    images_html = build_images_html(images_b64, comments)
 
     return jsonify({
         'success': True,
         'report': report,
         'images_html': images_html,
-        'images_count': len(images),
+        'images_count': len(images_b64),
         'weight': weight,
         'bw_exp': bw_exp
     })
