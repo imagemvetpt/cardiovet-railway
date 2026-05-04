@@ -90,26 +90,44 @@ def calculate_statut(key, value, cornell_pred=None):
             if op == '>'  and v >  threshold: return statut
     return 'N'
 
-def comment_single_image(img_b64, image_num, patient_info, key):
+def comment_single_image(img_b64, image_num, patient_info, key, rm=None, statuts=None):
     try:
         import anthropic as ac
         client_ai = ac.Anthropic(api_key=key)
+
+        mesures_ctx = ""
+        if rm:
+            mesures_disponibles = {k: v for k, v in rm.items() if v is not None}
+            if mesures_disponibles:
+                mesures_ctx = f"\nMESURES XML DISPONIBLES POUR CE PATIENT: {json.dumps(mesures_disponibles, indent=1)}\n"
+                mesures_ctx += "Utilise ces valeurs pour contextualiser ton analyse de cette image specifique.\n"
+
         msg = client_ai.messages.create(
             model='claude-sonnet-4-6',
-            max_tokens=300,
+            max_tokens=400,
             messages=[{
                 'role': 'user',
                 'content': [
                     {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": img_b64}},
                     {"type": "text", "text": (
                         f"Patient: {patient_info.get('animalName','?')}, "
-                        f"{patient_info.get('species','Chien')}, {patient_info.get('weight','?')}kg.\n\n"
-                        "Tu es cardiologue veterinaire expert en echocardiographie canine et feline.\n"
-                        "Analyse cette image echographique et reponds UNIQUEMENT en JSON (pas de markdown):\n"
-                        '{"caption":"type de vue precis ex: Parasternale droite grand axe Mode B + CFM",'
-                        '"comment":"observation clinique precise 1-2 phrases max 150 car avec valeurs visibles",'
+                        f"{patient_info.get('species','Chien')} / {patient_info.get('breed','race inconnue')}, "
+                        f"{patient_info.get('weight','?')}kg, examen du {patient_info.get('date','?')}.\n"
+                        + mesures_ctx +
+                        "\nTu es Dr Sebastien ROUL, cardiologue veterinaire expert en echocardiographie canine et feline.\n"
+                        "Analyse precisement cette image echographique (image numero " + str(image_num+1) + ").\n"
+                        "Identifie avec precision:\n"
+                        "1. Le type de coupe anatomique (grand axe / petit axe / apicale / sous-costale)\n"
+                        "2. Le mode d'acquisition (Mode B 2D / Mode TM / Doppler Couleur CFM / Doppler Pulse PW / Doppler Continu CW / DTI)\n"
+                        "3. Les structures visibles et leur aspect (VG, VD, OG, OD, valves, gros vaisseaux)\n"
+                        "4. Les anomalies eventuelles visibles sur CETTE image specifiquement\n"
+                        "5. Les valeurs numeriques visibles a l'ecran si presentes (Vmax, gradients, FC, dimensions)\n"
+                        "\nSois tres precis et ne confonds pas les vues (ex: flux pulmonaire =/= flux mitral).\n"
+                        "Reponds UNIQUEMENT en JSON (pas de markdown):\n"
+                        '{"caption":"identification precise de la vue ex: Parasternale droite petit axe - Doppler Couleur valve pulmonaire",'
+                        '"comment":"observation clinique detaillee 2-3 phrases avec valeurs numeriques visibles et signification clinique",'
                         '"statut":"N"}\n'
-                        'statut: N=normal, A=anomalie detectee, S=suspect a surveiller'
+                        "statut: N=normal, A=anomalie claire visible, S=suspect ou a confirmer"
                     )}
                 ]
             }]
@@ -255,7 +273,7 @@ def generate_cr():
     comments = []
     for i, b64 in enumerate(images_b64[:MAX_VISION]):
         print(f"Vision {i+1}/{min(len(images_b64),MAX_VISION)}...")
-        com = comment_single_image(b64, i, patient, key)
+        com = comment_single_image(b64, i, patient, key, rm, statuts)
         comments.append(com)
         print(f"  [{com.get('statut','?')}] {com.get('caption','?')[:55]}")
     for i in range(MAX_VISION, len(images_b64)):
@@ -263,7 +281,11 @@ def generate_cr():
 
     notes_section = ''
     if notes_text:
-        notes_section = f"\nOBSERVATIONS CLINIQUES DU CARDIOLOGUE (priorite absolue):\n{notes_text}\n"
+        notes_section = (
+            f"\n=== OBSERVATIONS CLINIQUES DU CARDIOLOGUE (SOURCE PRINCIPALE) ===\n"
+            f"{notes_text}\n"
+            f"=== FIN OBSERVATIONS ===\n"
+        )
 
     prompt = (
         f"Tu es Dr Vet. Sebastien ROUL, cardiologue veterinaire (N 6603 OMV / MRCVS).\n"
@@ -338,7 +360,6 @@ def generate_cr():
         except:
             return jsonify({'error': 'JSON parse error: ' + str(e), 'raw': txt[:500]}), 500
 
-    # Forcer statuts calculés + valeurs XML
     for k, v in rm.items():
         if v is not None and k in report.get('mesures', {}):
             report['mesures'][k]['val'] = v
