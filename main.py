@@ -9,9 +9,9 @@ CLAUDE_KEY = os.environ.get('CLAUDE_API_KEY', '')
 
 @app.route('/health', methods=['GET'])
 def health():
-    return jsonify({'status': 'ok', 'service': 'CardioVet CR Generator v8', 'key_set': bool(CLAUDE_KEY)})
+    return jsonify({'status': 'ok', 'service': 'CardioVet CR Generator v9', 'key_set': bool(CLAUDE_KEY)})
 
-def download_image(sb_url, sb_key, file_path):
+def download_file(sb_url, sb_key, file_path):
     try:
         import requests
         url = f"{sb_url}/storage/v1/object/cardiovet-files/{file_path}"
@@ -20,6 +20,18 @@ def download_image(sb_url, sb_key, file_path):
     except Exception as e:
         print(f"Download error {file_path}: {e}")
         return None
+
+def extract_pdf_text(pdf_bytes):
+    try:
+        import pypdf
+        reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
+        text = ''
+        for page in reader.pages:
+            text += page.extract_text() + '\n'
+        return text.strip()
+    except Exception as e:
+        print(f"PDF text extraction error: {e}")
+        return ''
 
 def image_to_jpeg_b64(img_bytes, filename=''):
     try:
@@ -38,6 +50,46 @@ def image_to_jpeg_b64(img_bytes, filename=''):
         print(f"Image conversion error {filename}: {e}")
         return None
 
+def calculate_statut(key, value, cornell_pred=None):
+    if value is None:
+        return 'N'
+    try:
+        v = float(value)
+    except:
+        return 'N'
+
+    if key in ('LVIDd', 'LVIDs', 'IVSd', 'PPd') and cornell_pred:
+        try:
+            pred = float(cornell_pred)
+            ecart = (v - pred) / pred
+            if abs(ecart) > 0.20: return 'A'
+            if abs(ecart) > 0.10: return 'L'
+            return 'N'
+        except:
+            return 'N'
+
+    rules = {
+        'LVIDdN': [('>=', 1.70, 'A'), ('>=', 1.60, 'L')],
+        'EPR':    [('>=', 0.42, 'A'), ('>=', 0.38, 'L')],
+        'FE':     [('<',  40.0, 'A'), ('<',  50.0, 'L')],
+        'FR':     [('<',  20.0, 'A'), ('<',  25.0, 'L'), ('>', 50.0, 'A'), ('>', 44.0, 'L')],
+        'FC':     [('<',  50.0, 'A'), ('<',  60.0, 'L'), ('>', 160.0,'A'), ('>', 130.0,'L')],
+        'VmaxAo': [('>=', 2.50, 'A'), ('>=', 1.70, 'L')],
+        'GmaxAo': [('>=', 36.0, 'A'), ('>=', 16.0, 'L')],
+        'VmaxAP': [('>=', 2.00, 'A'), ('>=', 1.60, 'L')],
+        'VmaxIM': [('>=', 5.00, 'A'), ('>=', 3.00, 'L')],
+        'OGAo':   [('>=', 1.60, 'A'), ('>=', 1.50, 'L')],
+        'EA':     [('<',  0.80, 'L'), ('<',  0.50, 'A'), ('>', 2.50, 'L'), ('>', 3.00, 'A')],
+        'EeRatio':[('>=', 15.0, 'A'), ('>=', 10.0, 'L')],
+        'PCP':    [('>=', 25.0, 'A'), ('>=', 15.0, 'L')],
+    }
+    if key in rules:
+        for op, threshold, statut in rules[key]:
+            if op == '>=' and v >= threshold: return statut
+            if op == '<'  and v <  threshold: return statut
+            if op == '>'  and v >  threshold: return statut
+    return 'N'
+
 def comment_single_image(img_b64, image_num, patient_info, key):
     try:
         import anthropic as ac
@@ -55,7 +107,7 @@ def comment_single_image(img_b64, image_num, patient_info, key):
                         "Tu es cardiologue veterinaire expert en echocardiographie canine et feline.\n"
                         "Analyse cette image echographique et reponds UNIQUEMENT en JSON (pas de markdown):\n"
                         '{"caption":"type de vue precis ex: Parasternale droite grand axe Mode B + CFM",'
-                        '"comment":"observation clinique precise en 1-2 phrases max 150 car avec valeurs si visibles",'
+                        '"comment":"observation clinique precise 1-2 phrases max 150 car avec valeurs visibles",'
                         '"statut":"N"}\n'
                         'statut: N=normal, A=anomalie detectee, S=suspect a surveiller'
                     )}
@@ -80,22 +132,12 @@ def comment_single_image(img_b64, image_num, patient_info, key):
 def build_images_html(images_b64, comments):
     if not images_b64:
         return ''
-
-    def border_color(statut):
-        if statut == 'A': return '#dc2626'
-        if statut == 'S': return '#d97706'
-        return '#1a3a5c'
-
-    def header_color(statut):
-        if statut == 'A': return '#dc2626'
-        if statut == 'S': return '#d97706'
-        return '#1a3a5c'
-
+    def bc(s): return '#dc2626' if s=='A' else '#d97706' if s=='S' else '#1a3a5c'
     html = (
         '<div style="background:#1a3a5c;color:white;padding:6px 12px;font-weight:bold;'
         'font-size:11px;margin:14px 0 6px">IMAGES ECHOGRAPHIQUES</div>'
         '<p style="font-size:9px;color:#6b7280;margin-bottom:4px">'
-        'Vues echographiques individuelles (Esaote MyLab) — interpretation par IA. '
+        'Vues echographiques (Esaote MyLab) — interpretation par IA. '
         '<span style="color:#1a3a5c;font-weight:bold">&#9632; Normal</span> '
         '<span style="color:#d97706;font-weight:bold">&#9632; Suspect</span> '
         '<span style="color:#dc2626;font-weight:bold">&#9632; Anomalie</span></p>'
@@ -110,17 +152,16 @@ def build_images_html(images_b64, comments):
                 caption = com.get('caption', f'Vue {idx+1}')
                 comment = com.get('comment', '')
                 statut  = com.get('statut', 'N')
-                bc = border_color(statut)
-                hc = header_color(statut)
+                color   = bc(statut)
                 img_data = f'data:image/jpeg;base64,{images_b64[idx]}'
                 html += (
                     f'<td style="width:50%;padding:6px;vertical-align:top">'
-                    f'<div style="border:2px solid {bc};border-radius:4px;overflow:hidden">'
+                    f'<div style="border:2px solid {color};border-radius:4px;overflow:hidden">'
                     f'<img src="{img_data}" style="width:100%;display:block"/>'
-                    f'<div style="background:{hc};color:white;font-size:9px;font-weight:bold;'
+                    f'<div style="background:{color};color:white;font-size:9px;font-weight:bold;'
                     f'padding:4px 8px;line-height:1.3">{caption}</div>'
                     + (f'<div style="font-size:8px;color:#374151;padding:5px 8px;'
-                       f'font-style:italic;line-height:1.5;background:white;border:1px solid #e5e7eb;border-top:none">'
+                       f'font-style:italic;line-height:1.5;background:white">'
                        f'&#x1F50D; {comment}</div>' if comment else '')
                     + '</div></td>'
                 )
@@ -141,15 +182,16 @@ def generate_cr():
     if not data:
         return jsonify({'error': 'No data'}), 400
 
-    xml_data    = data.get('xmlData', '')
-    patient     = data.get('patient', {})
-    image_paths = data.get('imagePaths', [])
-    file_path   = data.get('filePath', '')
-    consult_id  = data.get('consultId', '')
-    sb_url      = data.get('supabaseUrl', 'https://ddphqsmihbasndmautyu.supabase.co')
-    sb_key      = data.get('supabaseKey', '')
-    weight      = float(patient.get('weight', 0) or 0)
-    bw_exp      = round(weight ** 0.294, 3) if weight > 0 else None
+    xml_data       = data.get('xmlData', '')
+    patient        = data.get('patient', {})
+    image_paths    = data.get('imagePaths', [])
+    file_path      = data.get('filePath', '')
+    notes_pdf_path = data.get('notesPdfPath', '')
+    consult_id     = data.get('consultId', '')
+    sb_url         = data.get('supabaseUrl', 'https://ddphqsmihbasndmautyu.supabase.co')
+    sb_key         = data.get('supabaseKey', '')
+    weight         = float(patient.get('weight', 0) or 0)
+    bw_exp         = round(weight ** 0.294, 3) if weight > 0 else None
 
     def xm(key):
         r = re.search(r'Description="' + re.escape(key) + r'"[\s\S]*?<MeanValue[^>]*Value="([^"]+)"', xml_data)
@@ -181,29 +223,34 @@ def generate_cr():
     cornell = {k: round(c * bw_exp * 10, 1) if bw_exp else None
                for k, c in [('LVIDd', 1.53), ('LVIDs', 0.97), ('IVSd', 0.48), ('PPd', 0.48)]}
 
+    statuts = {}
+    for k, v in rm.items():
+        pred = cornell.get(k) if k in ('LVIDd','LVIDs','IVSd','PPd') else None
+        statuts[k] = calculate_statut(k, v, pred)
+
+    notes_text = ''
+    if notes_pdf_path and sb_key:
+        pdf_bytes = download_file(sb_url, sb_key, notes_pdf_path)
+        if pdf_bytes:
+            notes_text = extract_pdf_text(pdf_bytes)
+            print(f"Notes PDF: {len(notes_text)} car")
+
     images_b64 = []
     paths_to_use = image_paths if image_paths else ([file_path] if file_path else [])
-    print(f"Images to process: {len(paths_to_use)}")
-
     for path in paths_to_use[:16]:
-        if not path:
-            continue
-        img_bytes = download_image(sb_url, sb_key, path)
+        if not path: continue
+        img_bytes = download_file(sb_url, sb_key, path)
         if img_bytes:
             b64 = image_to_jpeg_b64(img_bytes, path)
             if b64:
                 images_b64.append(b64)
                 print(f"  OK: {path.split('/')[-1]}")
-        else:
-            print(f"  FAIL: {path}")
-
-    print(f"Images ready: {len(images_b64)}")
+    print(f"Images: {len(images_b64)}")
 
     key = CLAUDE_KEY
     if not key:
         return jsonify({'error': 'CLAUDE_API_KEY not set'}), 500
 
-    # Vision analyse sur les 10 premieres images (eviter timeout)
     MAX_VISION = 10
     comments = []
     for i, b64 in enumerate(images_b64[:MAX_VISION]):
@@ -211,9 +258,12 @@ def generate_cr():
         com = comment_single_image(b64, i, patient, key)
         comments.append(com)
         print(f"  [{com.get('statut','?')}] {com.get('caption','?')[:55]}")
-    # Images sans Vision — incluses sans commentaire
     for i in range(MAX_VISION, len(images_b64)):
         comments.append({'caption': f'Vue echographique {i+1}', 'comment': '', 'statut': 'N'})
+
+    notes_section = ''
+    if notes_text:
+        notes_section = f"\nOBSERVATIONS CLINIQUES DU CARDIOLOGUE (priorite absolue):\n{notes_text}\n"
 
     prompt = (
         f"Tu es Dr Vet. Sebastien ROUL, cardiologue veterinaire (N 6603 OMV / MRCVS).\n"
@@ -223,39 +273,39 @@ def generate_cr():
         f"Proprietaire: {patient.get('firstName','')} {patient.get('lastName','')}\n"
         f"Date: {patient.get('date','?')} | Clinique: {patient.get('clinic','ImagemVet')}\n\n"
         f"MESURES XML:\n{json.dumps({k:v for k,v in rm.items() if v is not None}, indent=1)}\n\n"
-        f"VALEURS PREDITES CORNELL ({weight}kg):\n{json.dumps(cornell, indent=1)}\n\n"
-        f"OBSERVATIONS IMAGES IA:\n"
-        + '\n'.join([f"- [{c.get('statut','N')}] {c.get('caption','')}: {c.get('comment','')}" for c in comments if c.get('comment')])
-        + f"\n\nGenere un compte rendu echocardiographique COMPLET et DETAILLE.\n"
-        f"Pour chaque parametre: interprete cliniquement, compare aux normes, explique la physiopathologie si anormal.\n"
-        f"Sections analyse: 3-5 phrases chacune. References: Chetboul AJVR 2005 | Thomas AJVR 1993 | ACVIM 2019 | Bussadori 2000.\n"
-        f"Statuts: N=normal, L=limite (10-20%), A=anormal (>20%), C=critique. Signification max 90 car.\n"
-        f"Reponds UNIQUEMENT en JSON valide sans markdown:\n"
-        '{{"mesures":{{"LVIDd":{{"val":null,"statut":"N","signification":"texte court"}},'
-        '"LVIDs":{{"val":null,"statut":"N","signification":"texte court"}},'
-        '"IVSd":{{"val":null,"statut":"N","signification":"texte court"}},'
-        '"PPd":{{"val":null,"statut":"N","signification":"texte court"}},'
-        '"LVIDdN":{{"val":null,"statut":"N","signification":"texte court"}},'
-        '"EPR":{{"val":null,"statut":"N","signification":"texte court"}},'
-        '"FE":{{"val":null,"statut":"N","signification":"texte court"}},'
-        '"FR":{{"val":null,"statut":"N","signification":"texte court"}},'
-        '"FC":{{"val":null,"statut":"N","signification":"texte court"}},'
-        '"DC":{{"val":null,"statut":"N","signification":"texte court"}},'
-        '"VmaxAo":{{"val":null,"statut":"N","signification":"texte court"}},'
-        '"GmaxAo":{{"val":null,"statut":"N","signification":"texte court"}},'
-        '"VmaxAP":{{"val":null,"statut":"N","signification":"texte court"}},'
-        '"VmaxIM":{{"val":null,"statut":"N","signification":"texte court"}},'
-        '"OGAo":{{"val":null,"statut":"N","signification":"texte court"}},'
-        '"EA":{{"val":null,"statut":"N","signification":"texte court"}},'
-        '"EeRatio":{{"val":null,"statut":"N","signification":"texte court"}},'
-        '"PCP":{{"val":null,"statut":"N","signification":"texte court"}}}},'
+        f"STATUTS CALCULES (utilise EXACTEMENT ces statuts):\n{json.dumps(statuts, indent=1)}\n\n"
+        f"VALEURS PREDITES CORNELL ({weight}kg):\n{json.dumps(cornell, indent=1)}\n"
+        + notes_section
+        + f"\nOBSERVATIONS IMAGES IA:\n"
+        + '\n'.join([f"- [{c.get('statut','N')}] {c.get('caption','')}: {c.get('comment','')}"
+                     for c in comments if c.get('comment')])
+        + f"\n\nGenere un compte rendu COMPLET et DETAILLE. Sections analyse: 3-5 phrases.\n"
+        f"{'Integre les observations cliniques en priorite.' if notes_text else ''}\n"
+        f"References: Chetboul AJVR 2005 | Thomas AJVR 1993 | ACVIM 2019 | Bussadori 2000.\n"
+        f"Signification par mesure: max 90 car. Reponds UNIQUEMENT en JSON valide sans markdown:\n"
+        '{{"mesures":{{"LVIDd":{{"val":null,"statut":"N","signification":"texte"}},'
+        '"LVIDs":{{"val":null,"statut":"N","signification":"texte"}},'
+        '"IVSd":{{"val":null,"statut":"N","signification":"texte"}},'
+        '"PPd":{{"val":null,"statut":"N","signification":"texte"}},'
+        '"LVIDdN":{{"val":null,"statut":"N","signification":"texte"}},'
+        '"EPR":{{"val":null,"statut":"N","signification":"texte"}},'
+        '"FE":{{"val":null,"statut":"N","signification":"texte"}},'
+        '"FR":{{"val":null,"statut":"N","signification":"texte"}},'
+        '"FC":{{"val":null,"statut":"N","signification":"texte"}},'
+        '"DC":{{"val":null,"statut":"N","signification":"texte"}},'
+        '"VmaxAo":{{"val":null,"statut":"N","signification":"texte"}},'
+        '"GmaxAo":{{"val":null,"statut":"N","signification":"texte"}},'
+        '"VmaxAP":{{"val":null,"statut":"N","signification":"texte"}},'
+        '"VmaxIM":{{"val":null,"statut":"N","signification":"texte"}},'
+        '"OGAo":{{"val":null,"statut":"N","signification":"texte"}},'
+        '"EA":{{"val":null,"statut":"N","signification":"texte"}},'
+        '"EeRatio":{{"val":null,"statut":"N","signification":"texte"}},'
+        '"PCP":{{"val":null,"statut":"N","signification":"texte"}}}},'
         '"analyse":{{"systolique":"3-5 phrases","diastolique":"3-5 phrases",'
-        '"aorte":"3-5 phrases avec classification SAS si applicable",'
-        '"atrium":"2-3 phrases","pulmonaire":"2-3 phrases"}},'
-        '"acvim":{{"stade":"A","description":"3-4 phrases justifiees"}},'
-        '"recommandations":{{"suivi":"delai et modalites precises",'
-        '"traitement":"indication ou absence justifiee","vigilance":"signes alarme precis","elevage":""}},'
-        '"conclusion":"4-6 phrases avec diagnostic principal et pronostic"}}'
+        '"aorte":"3-5 phrases avec SAS","atrium":"2-3 phrases","pulmonaire":"2-3 phrases"}},'
+        '"acvim":{{"stade":"A","description":"3-4 phrases"}},'
+        '"recommandations":{{"suivi":"precis","traitement":"precis","vigilance":"precis","elevage":""}},'
+        '"conclusion":"4-6 phrases"}}'
     )
 
     try:
@@ -288,9 +338,11 @@ def generate_cr():
         except:
             return jsonify({'error': 'JSON parse error: ' + str(e), 'raw': txt[:500]}), 500
 
+    # Forcer statuts calculés + valeurs XML
     for k, v in rm.items():
         if v is not None and k in report.get('mesures', {}):
             report['mesures'][k]['val'] = v
+            report['mesures'][k]['statut'] = statuts.get(k, 'N')
 
     images_html = build_images_html(images_b64, comments)
 
@@ -299,6 +351,7 @@ def generate_cr():
         'report': report,
         'images_html': images_html,
         'images_count': len(images_b64),
+        'notes_loaded': bool(notes_text),
         'weight': weight,
         'bw_exp': bw_exp
     })
