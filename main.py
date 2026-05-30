@@ -22,6 +22,7 @@ def download_file(sb_url, sb_key, file_path):
         return None
 
 def extract_pdf_text(pdf_bytes):
+    """Extrait le texte d'un PDF de notes cliniques"""
     try:
         import pypdf
         reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
@@ -51,6 +52,7 @@ def image_to_jpeg_b64(img_bytes, filename=''):
         return None
 
 def calculate_statut(key, value, cornell_pred=None):
+    """Calcule le statut de façon déterministe selon les seuils de référence"""
     if value is None:
         return 'N'
     try:
@@ -95,6 +97,7 @@ def comment_single_image(img_b64, image_num, patient_info, key, rm=None, statuts
         import anthropic as ac
         client_ai = ac.Anthropic(api_key=key)
 
+        # Contexte clinique riche pour aider Claude a identifier correctement la vue
         mesures_ctx = ""
         if rm:
             mesures_disponibles = {k: v for k, v in rm.items() if v is not None}
@@ -103,7 +106,7 @@ def comment_single_image(img_b64, image_num, patient_info, key, rm=None, statuts
                 mesures_ctx += "Utilise ces valeurs pour contextualiser ton analyse de cette image specifique.\n"
 
         msg = client_ai.messages.create(
-            model='claude-sonnet-4-6',
+            model='claude-opus-4-8',
             max_tokens=400,
             messages=[{
                 'role': 'user',
@@ -241,34 +244,40 @@ def generate_cr():
     cornell = {k: round(c * bw_exp * 10, 1) if bw_exp else None
                for k, c in [('LVIDd', 1.53), ('LVIDs', 0.97), ('IVSd', 0.48), ('PPd', 0.48)]}
 
+    # Calculer statuts de façon déterministe (pas laissé à Claude)
     statuts = {}
     for k, v in rm.items():
         pred = cornell.get(k) if k in ('LVIDd','LVIDs','IVSd','PPd') else None
         statuts[k] = calculate_statut(k, v, pred)
 
+    # Lire le PDF de notes cliniques
     notes_text = ''
     if notes_pdf_path and sb_key:
         pdf_bytes = download_file(sb_url, sb_key, notes_pdf_path)
         if pdf_bytes:
             notes_text = extract_pdf_text(pdf_bytes)
-            print(f"Notes PDF: {len(notes_text)} car")
+            print(f"Notes PDF: {len(notes_text)} caracteres extraits")
 
+    # Télécharger et convertir les images BMP
     images_b64 = []
     paths_to_use = image_paths if image_paths else ([file_path] if file_path else [])
+    print(f"Images: {len(paths_to_use)}")
     for path in paths_to_use[:16]:
-        if not path: continue
+        if not path:
+            continue
         img_bytes = download_file(sb_url, sb_key, path)
         if img_bytes:
             b64 = image_to_jpeg_b64(img_bytes, path)
             if b64:
                 images_b64.append(b64)
                 print(f"  OK: {path.split('/')[-1]}")
-    print(f"Images: {len(images_b64)}")
+    print(f"Images ready: {len(images_b64)}")
 
     key = CLAUDE_KEY
     if not key:
         return jsonify({'error': 'CLAUDE_API_KEY not set'}), 500
 
+    # Vision sur les 10 premières images
     MAX_VISION = 10
     comments = []
     for i, b64 in enumerate(images_b64[:MAX_VISION]):
@@ -279,13 +288,10 @@ def generate_cr():
     for i in range(MAX_VISION, len(images_b64)):
         comments.append({'caption': f'Vue echographique {i+1}', 'comment': '', 'statut': 'N'})
 
+    # Construire le prompt avec notes cliniques si disponibles
     notes_section = ''
     if notes_text:
-        notes_section = (
-            f"\n=== OBSERVATIONS CLINIQUES DU CARDIOLOGUE (SOURCE PRINCIPALE) ===\n"
-            f"{notes_text}\n"
-            f"=== FIN OBSERVATIONS ===\n"
-        )
+        notes_section = f"\nOBSERVATIONS CLINIQUES DU CARDIOLOGUE (à intégrer prioritairement):\n{notes_text}\n"
 
     prompt = (
         f"Tu es Dr Vet. Sebastien ROUL, cardiologue veterinaire (N 6603 OMV / MRCVS).\n"
@@ -295,46 +301,51 @@ def generate_cr():
         f"Proprietaire: {patient.get('firstName','')} {patient.get('lastName','')}\n"
         f"Date: {patient.get('date','?')} | Clinique: {patient.get('clinic','ImagemVet')}\n\n"
         f"MESURES XML:\n{json.dumps({k:v for k,v in rm.items() if v is not None}, indent=1)}\n\n"
-        f"STATUTS CALCULES (utilise EXACTEMENT ces statuts):\n{json.dumps(statuts, indent=1)}\n\n"
+        f"STATUTS CALCULES (utilise EXACTEMENT ces statuts, ne les modifie pas):\n"
+        f"{json.dumps(statuts, indent=1)}\n\n"
         f"VALEURS PREDITES CORNELL ({weight}kg):\n{json.dumps(cornell, indent=1)}\n"
         + notes_section
         + f"\nOBSERVATIONS IMAGES IA:\n"
         + '\n'.join([f"- [{c.get('statut','N')}] {c.get('caption','')}: {c.get('comment','')}"
                      for c in comments if c.get('comment')])
-        + f"\n\nGenere un compte rendu COMPLET et DETAILLE. Sections analyse: 3-5 phrases.\n"
-        f"{'Integre les observations cliniques en priorite.' if notes_text else ''}\n"
+        + f"\n\nGenere un compte rendu echocardiographique COMPLET et DETAILLE.\n"
+        f"IMPORTANT: utilise EXACTEMENT les statuts fournis dans STATUTS CALCULES pour chaque mesure.\n"
+        f"{'Integre les observations cliniques du cardiologue en priorite dans les analyses.' if notes_text else ''}\n"
+        f"Sections analyse: 3-5 phrases chacune.\n"
         f"References: Chetboul AJVR 2005 | Thomas AJVR 1993 | ACVIM 2019 | Bussadori 2000.\n"
-        f"Signification par mesure: max 90 car. Reponds UNIQUEMENT en JSON valide sans markdown:\n"
-        '{{"mesures":{{"LVIDd":{{"val":null,"statut":"N","signification":"texte"}},'
-        '"LVIDs":{{"val":null,"statut":"N","signification":"texte"}},'
-        '"IVSd":{{"val":null,"statut":"N","signification":"texte"}},'
-        '"PPd":{{"val":null,"statut":"N","signification":"texte"}},'
-        '"LVIDdN":{{"val":null,"statut":"N","signification":"texte"}},'
-        '"EPR":{{"val":null,"statut":"N","signification":"texte"}},'
-        '"FE":{{"val":null,"statut":"N","signification":"texte"}},'
-        '"FR":{{"val":null,"statut":"N","signification":"texte"}},'
-        '"FC":{{"val":null,"statut":"N","signification":"texte"}},'
-        '"DC":{{"val":null,"statut":"N","signification":"texte"}},'
-        '"VmaxAo":{{"val":null,"statut":"N","signification":"texte"}},'
-        '"GmaxAo":{{"val":null,"statut":"N","signification":"texte"}},'
-        '"VmaxAP":{{"val":null,"statut":"N","signification":"texte"}},'
-        '"VmaxIM":{{"val":null,"statut":"N","signification":"texte"}},'
-        '"OGAo":{{"val":null,"statut":"N","signification":"texte"}},'
-        '"EA":{{"val":null,"statut":"N","signification":"texte"}},'
-        '"EeRatio":{{"val":null,"statut":"N","signification":"texte"}},'
-        '"PCP":{{"val":null,"statut":"N","signification":"texte"}}}},'
+        f"Signification par mesure: max 90 car.\n"
+        f"Reponds UNIQUEMENT en JSON valide sans markdown:\n"
+        '{{"mesures":{{"LVIDd":{{"val":null,"statut":"N","signification":"texte court"}},'
+        '"LVIDs":{{"val":null,"statut":"N","signification":"texte court"}},'
+        '"IVSd":{{"val":null,"statut":"N","signification":"texte court"}},'
+        '"PPd":{{"val":null,"statut":"N","signification":"texte court"}},'
+        '"LVIDdN":{{"val":null,"statut":"N","signification":"texte court"}},'
+        '"EPR":{{"val":null,"statut":"N","signification":"texte court"}},'
+        '"FE":{{"val":null,"statut":"N","signification":"texte court"}},'
+        '"FR":{{"val":null,"statut":"N","signification":"texte court"}},'
+        '"FC":{{"val":null,"statut":"N","signification":"texte court"}},'
+        '"DC":{{"val":null,"statut":"N","signification":"texte court"}},'
+        '"VmaxAo":{{"val":null,"statut":"N","signification":"texte court"}},'
+        '"GmaxAo":{{"val":null,"statut":"N","signification":"texte court"}},'
+        '"VmaxAP":{{"val":null,"statut":"N","signification":"texte court"}},'
+        '"VmaxIM":{{"val":null,"statut":"N","signification":"texte court"}},'
+        '"OGAo":{{"val":null,"statut":"N","signification":"texte court"}},'
+        '"EA":{{"val":null,"statut":"N","signification":"texte court"}},'
+        '"EeRatio":{{"val":null,"statut":"N","signification":"texte court"}},'
+        '"PCP":{{"val":null,"statut":"N","signification":"texte court"}}}},'
         '"analyse":{{"systolique":"3-5 phrases","diastolique":"3-5 phrases",'
-        '"aorte":"3-5 phrases avec SAS","atrium":"2-3 phrases","pulmonaire":"2-3 phrases"}},'
-        '"acvim":{{"stade":"A","description":"3-4 phrases"}},'
-        '"recommandations":{{"suivi":"precis","traitement":"precis","vigilance":"precis","elevage":""}},'
-        '"conclusion":"4-6 phrases"}}'
+        '"aorte":"3-5 phrases avec classification SAS","atrium":"2-3 phrases","pulmonaire":"2-3 phrases"}},'
+        '"acvim":{{"stade":"A","description":"3-4 phrases justifiees"}},'
+        '"recommandations":{{"suivi":"precis et justifie","traitement":"precis ou absence justifiee",'
+        '"vigilance":"signes alarme precis","elevage":""}},'
+        '"conclusion":"4-6 phrases diagnostic principal et pronostic"}}'
     )
 
     try:
         import anthropic as ac
         client_ai = ac.Anthropic(api_key=key)
         message = client_ai.messages.create(
-            model='claude-sonnet-4-6',
+            model='claude-opus-4-8',
             max_tokens=5000,
             messages=[{'role': 'user', 'content': prompt}]
         )
@@ -360,6 +371,7 @@ def generate_cr():
         except:
             return jsonify({'error': 'JSON parse error: ' + str(e), 'raw': txt[:500]}), 500
 
+    # Forcer les statuts calculés (override ceux de Claude)
     for k, v in rm.items():
         if v is not None and k in report.get('mesures', {}):
             report['mesures'][k]['val'] = v
