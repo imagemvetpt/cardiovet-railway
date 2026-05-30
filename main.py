@@ -360,14 +360,18 @@ def generate_cr():
             clean = re.sub(r'^```(?:json)?\n?', '', clean)
             clean = re.sub(r'\n?```$', '', clean)
             clean = clean.strip()
-        match = re.search(r'\{[\s\S]*\}', clean)
-        json_str = match.group(0) if match else clean
+        # Se positionner sur le premier '{' puis decoder le PREMIER objet JSON valide,
+        # en ignorant tout texte ajoute apres (corrige "Extra data")
+        start = clean.find('{')
+        if start == -1:
+            return jsonify({'error': 'Pas de JSON dans la reponse', 'raw': txt[:500]}), 500
+        json_str = clean[start:]
         json_str = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]', '', json_str)
-        report = json.loads(json_str)
+        report, _idx = json.JSONDecoder().raw_decode(json_str)
     except Exception as e:
         try:
             simple = re.sub(r'"signification"\s*:\s*"[^"]*"', '"signification": "voir analyse"', json_str)
-            report = json.loads(simple)
+            report, _idx = json.JSONDecoder().raw_decode(simple)
         except:
             return jsonify({'error': 'JSON parse error: ' + str(e), 'raw': txt[:500]}), 500
 
